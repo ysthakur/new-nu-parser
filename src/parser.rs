@@ -74,12 +74,15 @@ pub enum AstNode {
     Null,
 
     // Operators
-    Or,
-    Xor, // todo
-    And,
-    BitOr,  // todo
-    BitXor, // todo
-    BitAnd, // todo
+    Pow,
+    Multiply,
+    Divide,
+    FloorDiv,
+    Modulo,
+    Plus,
+    Minus,
+    ShiftLeft,     // todo
+    ShiftRight,    // todo
     Equal,
     NotEqual,
     LessThan,
@@ -92,16 +95,13 @@ pub enum AstNode {
     EndsWith,      // todo
     In,            // todo
     NotIn,         // todo
-    ShiftLeft,     // todo
-    ShiftRight,    // todo
-    Plus,
     Append,
-    Minus,
-    Multiply,
-    Divide,
-    FloorDiv,
-    Modulo,
-    Pow,
+    BitAnd,  // todo
+    BitXor, // todo
+    BitOr, // todo
+    And,
+    Xor, // todo
+    Or,
     Not, // todo
 
     // Assignments
@@ -110,7 +110,7 @@ pub enum AstNode {
     SubtractAssignment,
     MultiplyAssignment,
     DivideAssignment,
-    // TODO: append assignment ++=
+    AppendAssignment, // todo
 
     // Statements
     Let {
@@ -214,19 +214,32 @@ impl AstNode {
             AstNode::Pow => 100,
             AstNode::Multiply | AstNode::Divide | AstNode::FloorDiv | AstNode::Modulo => 95,
             AstNode::Plus | AstNode::Minus => 90,
+            AstNode::ShiftLeft | AstNode::ShiftRight => 85,
             AstNode::LessThan
             | AstNode::LessThanOrEqual
             | AstNode::GreaterThan
             | AstNode::GreaterThanOrEqual
             | AstNode::Equal
-            | AstNode::NotEqual => 80,
+            | AstNode::NotEqual
+            | AstNode::RegexMatch
+            | AstNode::NotRegexMatch
+            | AstNode::StartsWith
+            | AstNode::EndsWith
+            | AstNode::In
+            | AstNode::NotIn
+            | AstNode::Append => 80,
+            AstNode::BitAnd => 70,
+            AstNode::BitXor => 65,
+            AstNode::BitOr => 60,
             AstNode::And => 50,
+            AstNode::Xor => 45,
             AstNode::Or => 40,
             AstNode::Assignment
             | AstNode::AddAssignment
             | AstNode::SubtractAssignment
             | AstNode::MultiplyAssignment
-            | AstNode::DivideAssignment => ASSIGNMENT_PRECEDENCE,
+            | AstNode::DivideAssignment
+            | AstNode::AppendAssignment => ASSIGNMENT_PRECEDENCE,
             _ => 0,
         }
     }
