@@ -530,7 +530,55 @@ impl<'a> Typechecker<'a> {
                     Some(type_id)
                 }
             }
-            AstNode::And | AstNode::Or => match (lhs_type, rhs_type) {
+            AstNode::ShiftLeft
+            | AstNode::ShiftRight
+            | AstNode::BitAnd
+            | AstNode::BitXor
+            | AstNode::BitOr => {
+                if is_subtype_or_any(lhs_type, Type::Int) || is_subtype_or_any(rhs_type, Type::Int)
+                {
+                    Some(Type::Int)
+                } else {
+                    self.binary_op_err("math operation", lhs, op, rhs);
+                    None
+                }
+            }
+            AstNode::RegexMatch
+            | AstNode::NotRegexMatch
+            | AstNode::StartsWith
+            | AstNode::EndsWith => {
+                if is_subtype_or_any(lhs_type, Type::String)
+                    || is_subtype_or_any(rhs_type, Type::String)
+                {
+                    Some(Type::Bool)
+                } else {
+                    self.binary_op_err("string operation", lhs, op, rhs);
+                    None
+                }
+            }
+            AstNode::In | AstNode::NotIn => match rhs_type {
+                Type::String => {
+                    if is_subtype_or_any(lhs_type, Type::String) {
+                        Some(Type::Bool)
+                    } else {
+                        self.binary_op_err("string operation", lhs, op, rhs);
+                        None
+                    }
+                }
+                Type::List(elem_ty) => {
+                    if is_type_compatible(lhs_type, self.types[elem_ty.0]) {
+                        Some(Type::Bool)
+                    } else {
+                        self.binary_op_err("list operation", lhs, op, rhs);
+                        None
+                    }
+                }
+                _ => {
+                    self.binary_op_err("list/string operation", lhs, op, rhs);
+                    None
+                }
+            },
+            AstNode::And | AstNode::Xor | AstNode::Or => match (lhs_type, rhs_type) {
                 (Type::Bool, Type::Bool) => Some(Type::Bool),
                 _ => {
                     self.binary_op_err("logical operation", lhs, op, rhs);
@@ -581,7 +629,8 @@ impl<'a> Typechecker<'a> {
             | AstNode::AddAssignment
             | AstNode::SubtractAssignment
             | AstNode::MultiplyAssignment
-            | AstNode::DivideAssignment => Some(Type::None),
+            | AstNode::DivideAssignment
+            | AstNode::AppendAssignment => Some(Type::None),
             _ => panic!("internal error: unsupported node passed as binary op: {op:?}"),
         };
 
@@ -899,6 +948,17 @@ fn is_type_compatible(lhs: Type, rhs: Type) -> bool {
         (Type::Number, Type::Float) => true,
         (Type::Any, _) => true,
         (_, Type::Any) => true,
+        _ => lhs == rhs,
+    }
+}
+
+/// Check if `lhs` is either a subtype of `rhs` or `Any`
+fn is_subtype_or_any(lhs: Type, rhs: Type) -> bool {
+    match (lhs, rhs) {
+        (Type::Int, Type::Number) => true,
+        (Type::Float, Type::Number) => true,
+        (_, Type::Any) => true,
+        (Type::Any, _) => true,
         _ => lhs == rhs,
     }
 }
