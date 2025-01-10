@@ -688,38 +688,67 @@ impl Parser {
         }
     }
 
-    pub fn operator(&mut self) -> NodeId {
+    pub fn try_operator(&mut self) -> Option<(AstNode, Span)> {
         let (token, span) = self.tokens.peek();
 
-        match token {
-            Token::Plus => self.advance_node(AstNode::Plus, span),
-            Token::PlusPlus => self.advance_node(AstNode::Append, span),
-            Token::Dash => self.advance_node(AstNode::Minus, span),
-            Token::Asterisk => self.advance_node(AstNode::Multiply, span),
-            Token::ForwardSlash => self.advance_node(AstNode::Divide, span),
-            Token::ForwardSlashForwardSlash => self.advance_node(AstNode::FloorDiv, span),
-            Token::LessThan => self.advance_node(AstNode::LessThan, span),
-            Token::LessThanEqual => self.advance_node(AstNode::LessThanOrEqual, span),
-            Token::GreaterThan => self.advance_node(AstNode::GreaterThan, span),
-            Token::GreaterThanEqual => self.advance_node(AstNode::GreaterThanOrEqual, span),
-            Token::EqualsEquals => self.advance_node(AstNode::Equal, span),
-            Token::ExclamationEquals => self.advance_node(AstNode::NotEqual, span),
-            Token::AsteriskAsterisk => self.advance_node(AstNode::Pow, span),
-            Token::Equals => self.advance_node(AstNode::Assignment, span),
-            Token::PlusEquals => self.advance_node(AstNode::AddAssignment, span),
-            Token::DashEquals => self.advance_node(AstNode::SubtractAssignment, span),
-            Token::AsteriskEquals => self.advance_node(AstNode::MultiplyAssignment, span),
-            Token::ForwardSlashEquals => self.advance_node(AstNode::DivideAssignment, span),
+        let node = match token {
+            Token::AsteriskAsterisk => AstNode::Pow,
+            Token::Asterisk => AstNode::Multiply,
+            Token::ForwardSlash => AstNode::Divide,
+            Token::ForwardSlashForwardSlash => AstNode::FloorDiv,
+            Token::Plus => AstNode::Plus,
+            Token::Dash => AstNode::Minus,
+            Token::EqualsEquals => AstNode::Equal,
+            Token::ExclamationEquals => AstNode::NotEqual,
+            Token::LessThan => AstNode::LessThan,
+            Token::LessThanEqual => AstNode::LessThanOrEqual,
+            Token::GreaterThan => AstNode::GreaterThan,
+            Token::GreaterThanEqual => AstNode::GreaterThanOrEqual,
+            Token::EqualsTilde => AstNode::RegexMatch,
+            Token::ExclamationTilde => AstNode::NotRegexMatch,
+            Token::PlusPlus => AstNode::Append,
+            Token::Equals => AstNode::Assignment,
+            Token::PlusEquals => AstNode::AddAssignment,
+            Token::DashEquals => AstNode::SubtractAssignment,
+            Token::AsteriskEquals => AstNode::MultiplyAssignment,
+            Token::ForwardSlashEquals => AstNode::DivideAssignment,
+            Token::PlusPlusEquals => AstNode::AppendAssignment,
             Token::Bareword => match self.compiler.get_span_contents_manual(span.start, span.end) {
-                b"mod" => self.advance_node(AstNode::Modulo, span),
-                b"and" => self.advance_node(AstNode::And, span),
-                b"or" => self.advance_node(AstNode::Or, span),
-                op => self.error(format!(
-                    "Unknown operator: '{}'",
-                    String::from_utf8_lossy(op)
-                )),
+                b"mod" => AstNode::Modulo,
+                b"bit-shl" => AstNode::ShiftLeft,
+                b"bit-shr" => AstNode::ShiftRight,
+                b"starts-with" => AstNode::StartsWith,
+                b"ends-with" => AstNode::EndsWith,
+                b"in" => AstNode::In,
+                b"not-in" => AstNode::NotIn,
+                b"bit-and" => AstNode::BitAnd,
+                b"bit-xor" => AstNode::BitXor,
+                b"bit-or" => AstNode::BitOr,
+                b"and" => AstNode::And,
+                b"xor" => AstNode::Xor,
+                b"or" => AstNode::Or,
+                _ => return None,
             },
-            _ => self.error("expected: operator"),
+            _ => return None,
+        };
+        Some((node, span))
+    }
+
+    pub fn operator(&mut self) -> NodeId {
+        if let Some((node, span)) = self.try_operator() {
+            self.advance_node(node, span)
+        } else {
+            let (token, span) = self.tokens.peek();
+            match token {
+                Token::Bareword => {
+                    let op = self.compiler.get_span_contents_manual(span.start, span.end);
+                    self.error(format!(
+                        "Unknown operator: '{}'",
+                        String::from_utf8_lossy(op)
+                    ))
+                }
+                _ => self.error("expected: operator"),
+            }
         }
     }
 
@@ -1291,47 +1320,7 @@ impl Parser {
     }
 
     pub fn is_operator(&mut self) -> bool {
-        let (token, span) = self.tokens.peek();
-
-        match token {
-            Token::Plus
-            | Token::PlusPlus
-            | Token::Dash
-            | Token::Asterisk
-            | Token::ForwardSlash
-            | Token::ForwardSlashForwardSlash
-            | Token::LessThan
-            | Token::LessThanEqual
-            | Token::GreaterThan
-            | Token::GreaterThanEqual
-            | Token::EqualsEquals
-            | Token::ExclamationEquals
-            | Token::EqualsTilde
-            | Token::ExclamationTilde
-            | Token::AsteriskAsterisk
-            | Token::Equals
-            | Token::PlusEquals
-            | Token::DashEquals
-            | Token::AsteriskEquals
-            | Token::ForwardSlashEquals => true,
-            Token::Bareword => {
-                let op = self.compiler.get_span_contents_manual(span.start, span.end);
-                op == b"mod"
-                    || op == b"bit-shl"
-                    || op == b"bit-shr"
-                    || op == b"starts-with"
-                    || op == b"ends-with"
-                    || op == b"in"
-                    || op == b"not-in"
-                    || op == b"bit-and"
-                    || op == b"bit-xor"
-                    || op == b"bit-or"
-                    || op == b"and"
-                    || op == b"xor"
-                    || op == b"or"
-            }
-            _ => false,
-        }
+        self.try_operator().is_some()
     }
 
     pub fn is_equals(&mut self) -> bool {
