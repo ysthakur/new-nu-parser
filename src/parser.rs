@@ -74,21 +74,36 @@ pub enum AstNode {
     Null,
 
     // Operators
+    Or,
+    Xor, // todo
+    And,
+    BitOr,  // todo
+    BitXor, // todo
+    BitAnd, // todo
     Equal,
     NotEqual,
     LessThan,
     GreaterThan,
     LessThanOrEqual,
     GreaterThanOrEqual,
+    RegexMatch,    // todo
+    NotRegexMatch, // todo
+    StartsWith,    // todo
+    EndsWith,      // todo
+    In,            // todo
+    NotIn,         // todo
+    Concat,        // todo
+    ShiftLeft,     // todo
+    ShiftRight,    // todo
     Plus,
     Append,
     Minus,
     Multiply,
     Divide,
-    // Modulo,
-    And,
-    Or,
+    FloorDiv, // todo
+    Modulo,   // todo
     Pow,
+    Not, // todo
 
     // Assignments
     Assignment,
@@ -198,8 +213,7 @@ impl AstNode {
     pub fn precedence(&self) -> usize {
         match self {
             AstNode::Pow => 100,
-            AstNode::Multiply | AstNode::Divide => 95,
-            //AstNode::Modulo => 95,
+            AstNode::Multiply | AstNode::Divide | AstNode::FloorDiv | AstNode::Modulo => 95,
             AstNode::Plus | AstNode::Minus => 90,
             AstNode::LessThan
             | AstNode::LessThanOrEqual
