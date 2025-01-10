@@ -81,8 +81,8 @@ pub enum AstNode {
     Modulo,
     Plus,
     Minus,
-    ShiftLeft,     // todo
-    ShiftRight,    // todo
+    ShiftLeft,  // todo
+    ShiftRight, // todo
     Equal,
     NotEqual,
     LessThan,
@@ -96,9 +96,9 @@ pub enum AstNode {
     In,            // todo
     NotIn,         // todo
     Append,
-    BitAnd,  // todo
+    BitAnd, // todo
     BitXor, // todo
-    BitOr, // todo
+    BitOr,  // todo
     And,
     Xor, // todo
     Or,
@@ -1306,6 +1306,8 @@ impl Parser {
             | Token::GreaterThanEqual
             | Token::EqualsEquals
             | Token::ExclamationEquals
+            | Token::EqualsTilde
+            | Token::ExclamationTilde
             | Token::AsteriskAsterisk
             | Token::Equals
             | Token::PlusEquals
@@ -1314,7 +1316,19 @@ impl Parser {
             | Token::ForwardSlashEquals => true,
             Token::Bareword => {
                 let op = self.compiler.get_span_contents_manual(span.start, span.end);
-                op == b"mod" || op == b"and" || op == b"or"
+                op == b"mod"
+                    || op == b"bit-shl"
+                    || op == b"bit-shr"
+                    || op == b"starts-with"
+                    || op == b"ends-with"
+                    || op == b"in"
+                    || op == b"not-in"
+                    || op == b"bit-and"
+                    || op == b"bit-xor"
+                    || op == b"bit-or"
+                    || op == b"and"
+                    || op == b"xor"
+                    || op == b"or"
             }
             _ => false,
         }
