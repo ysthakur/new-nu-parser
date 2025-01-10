@@ -515,7 +515,12 @@ impl<'a> Typechecker<'a> {
                     Some(Type::Bool)
                 }
             }
-            AstNode::Minus | AstNode::Multiply | AstNode::Divide | AstNode::Pow => {
+            AstNode::Minus
+            | AstNode::Multiply
+            | AstNode::Divide
+            | AstNode::FloorDiv
+            | AstNode::Modulo
+            | AstNode::Pow => {
                 let type_id = check_numeric_op(lhs_type, rhs_type);
 
                 if type_id == Type::Unknown {

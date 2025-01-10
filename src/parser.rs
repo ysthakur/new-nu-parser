@@ -92,7 +92,6 @@ pub enum AstNode {
     EndsWith,      // todo
     In,            // todo
     NotIn,         // todo
-    Concat,        // todo
     ShiftLeft,     // todo
     ShiftRight,    // todo
     Plus,
@@ -100,8 +99,8 @@ pub enum AstNode {
     Minus,
     Multiply,
     Divide,
-    FloorDiv, // todo
-    Modulo,   // todo
+    FloorDiv,
+    Modulo,
     Pow,
     Not, // todo
 
@@ -685,6 +684,7 @@ impl Parser {
             Token::Dash => self.advance_node(AstNode::Minus, span),
             Token::Asterisk => self.advance_node(AstNode::Multiply, span),
             Token::ForwardSlash => self.advance_node(AstNode::Divide, span),
+            Token::ForwardSlashForwardSlash => self.advance_node(AstNode::FloorDiv, span),
             Token::LessThan => self.advance_node(AstNode::LessThan, span),
             Token::LessThanEqual => self.advance_node(AstNode::LessThanOrEqual, span),
             Token::GreaterThan => self.advance_node(AstNode::GreaterThan, span),
@@ -698,6 +698,7 @@ impl Parser {
             Token::AsteriskEquals => self.advance_node(AstNode::MultiplyAssignment, span),
             Token::ForwardSlashEquals => self.advance_node(AstNode::DivideAssignment, span),
             Token::Bareword => match self.compiler.get_span_contents_manual(span.start, span.end) {
+                b"mod" => self.advance_node(AstNode::Modulo, span),
                 b"and" => self.advance_node(AstNode::And, span),
                 b"or" => self.advance_node(AstNode::Or, span),
                 op => self.error(format!(
@@ -1285,6 +1286,7 @@ impl Parser {
             | Token::Dash
             | Token::Asterisk
             | Token::ForwardSlash
+            | Token::ForwardSlashForwardSlash
             | Token::LessThan
             | Token::LessThanEqual
             | Token::GreaterThan
@@ -1299,7 +1301,7 @@ impl Parser {
             | Token::ForwardSlashEquals => true,
             Token::Bareword => {
                 let op = self.compiler.get_span_contents_manual(span.start, span.end);
-                op == b"and" || op == b"or"
+                op == b"mod" || op == b"and" || op == b"or"
             }
             _ => false,
         }
