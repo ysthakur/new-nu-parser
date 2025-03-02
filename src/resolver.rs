@@ -1,9 +1,9 @@
-use crate::parser::{Expr, ExprHandle};
+use crate::parser::{Expr, ExprHandle, Stmt, StmtHandle};
 use crate::protocol::{Command, Declaration};
 use crate::{
     compiler::Compiler,
     errors::{Severity, SourceError},
-    parser::{AstNode, BlockId, NodeId},
+    parser::{BlockId, NodeId},
 };
 use std::collections::HashMap;
 
@@ -191,163 +191,156 @@ impl<'a> Resolver<'a> {
 
     pub fn resolve(&mut self) {
         for entry in &self.compiler.entry_points {
-            self.resolve_expr(entry.clone())
+            self.enter_scope(entry.id);
+            self.resolve_block(entry.id, *entry.node, None);
+            self.exit_scope();
         }
     }
 
     pub fn resolve_expr(&mut self, expr: ExprHandle<'a>) {
+        let node_id = expr.id;
         match expr.node {
-            Expr::VarRef => self.resolve_variable(node_id),
-            Expr::Call { ref parts } => self.resolve_call(node_id, parts),
-            Expr::Block(block_id) => self.resolve_block(node_id, block_id, None),
+            Expr::VarRef => self.resolve_variable(expr.id),
+            Expr::Call { ref parts } => self.resolve_call(expr.id, parts),
+            Expr::Block(block_id) => self.resolve_block(node_id, *block_id, None),
             Expr::Closure { params, block } => {
                 // making sure the closure parameters and body end up in the same scope frame
                 let closure_scope = if let Some(params) = params {
-                    self.enter_scope(block);
-                    self.resolve_node(params);
+                    self.enter_scope(block.id);
+                    for param in &params.node.0 {
+                        self.define_variable(param.node.name, false);
+                    }
                     Some(self.exit_scope())
                 } else {
                     None
                 };
 
-                let AstNode::Block(block_id) = self.compiler.ast_nodes[block.0] else {
-                    panic!("internal error: closure's body is not a block");
-                };
-
-                self.resolve_block(block, block_id, closure_scope);
+                self.resolve_block(block.id, *block.node, closure_scope);
             }
             Expr::BinaryOp { lhs, op: _, rhs } => {
-                self.resolve_node(lhs);
-                self.resolve_node(rhs);
+                self.resolve_expr(lhs.clone());
+                self.resolve_expr(rhs.clone());
             }
             Expr::Range { lhs, rhs } => {
-                self.resolve_node(lhs);
-                self.resolve_node(rhs);
+                self.resolve_expr(lhs.clone());
+                self.resolve_expr(rhs.clone());
             }
-            Expr::List(ref nodes) => {
-                for node in nodes {
-                    self.resolve_node(*node);
+            Expr::List(ref items) => {
+                for item in items {
+                    self.resolve_expr(item.clone());
                 }
             }
             Expr::Table { header, ref rows } => {
-                self.resolve_node(header);
+                self.resolve_expr(header.clone());
                 for row in rows {
-                    self.resolve_node(*row);
+                    self.resolve_expr(row.clone());
                 }
             }
             Expr::Record { ref pairs } => {
                 for (key, val) in pairs {
-                    self.resolve_node(*key);
-                    self.resolve_node(*val);
+                    self.resolve_expr(key.clone());
+                    self.resolve_expr(val.clone());
                 }
             }
-            Expr::MemberAccess { target, field } => {
-                self.resolve_node(target);
-                self.resolve_node(field);
+            Expr::MemberAccess { target, .. } => {
+                self.resolve_expr(target.clone());
+                // TODO original code resolved field too, necessary?
             }
             Expr::If {
                 condition,
                 then_block,
                 else_block,
             } => {
-                self.resolve_node(condition);
-                self.resolve_node(then_block);
+                self.resolve_expr(condition.clone());
+                self.resolve_block(then_block.id, *then_block.node, None);
                 if let Some(block) = else_block {
-                    self.resolve_node(block);
+                    self.resolve_expr(block.clone());
                 }
             }
             Expr::Match {
                 target,
                 ref match_arms,
             } => {
-                self.resolve_node(target);
+                self.resolve_expr(target.clone());
                 for (arm_lhs, arm_rhs) in match_arms {
-                    self.resolve_node(*arm_lhs);
-                    self.resolve_node(*arm_rhs);
+                    self.resolve_expr(arm_lhs.clone());
+                    self.resolve_expr(arm_rhs.clone());
                 }
             }
+            Expr::Int
+            | Expr::Float
+            | Expr::String { .. }
+            | Expr::True
+            | Expr::False
+            | Expr::Null
+            | Expr::NamedValue { .. }
+            | Expr::Garbage => {}
         }
     }
 
-    pub fn resolve_node(&mut self, node_id: NodeId) {
-        // TODO: Move node_id param to the end, same as in typechecker
-        match self.compiler.ast_nodes[node_id.0] {
-            AstNode::Def {
+    pub fn resolve_stmt(&mut self, stmt: StmtHandle<'a>) {
+        match stmt.node {
+            Stmt::Def {
                 name,
                 params,
                 return_ty: _,
                 block,
             } => {
                 // define the command before the block to enable recursive calls
-                self.define_decl(name);
+                self.define_decl(*name);
 
                 // making sure the def parameters and body end up in the same scope frame
-                self.enter_scope(block);
-                self.resolve_node(params);
+                self.enter_scope(block.id);
+                for param in &params.node.0 {
+                    self.define_variable(param.id, false);
+                }
                 let def_scope = self.exit_scope();
 
-                let AstNode::Block(block_id) = self.compiler.ast_nodes[block.0] else {
-                    panic!("internal error: command definition's body is not a block");
-                };
-
-                self.resolve_block(block, block_id, Some(def_scope));
+                self.resolve_block(block.id, *block.node, Some(def_scope));
             }
-            AstNode::Alias {
+            Stmt::Alias {
                 new_name,
                 old_name: _,
             } => {
-                self.define_decl(new_name);
+                self.define_decl(*new_name);
             }
-            AstNode::Params(ref params) => {
-                for param in params {
-                    if let AstNode::Param { name, .. } = self.compiler.ast_nodes[param.0] {
-                        self.define_variable(name, false);
-                    } else {
-                        panic!("param is not a param");
-                    }
-                }
-            }
-            AstNode::Let {
+            Stmt::Let {
                 variable_name,
                 ty: _,
                 initializer,
                 is_mutable,
             } => {
-                self.resolve_node(initializer);
-                self.define_variable(variable_name, is_mutable)
+                self.resolve_expr(initializer.clone());
+                self.define_variable(*variable_name, *is_mutable)
             }
-            AstNode::While { condition, block } => {
-                self.resolve_node(condition);
-                self.resolve_node(block);
+            Stmt::While { condition, block } => {
+                self.resolve_expr(condition.clone());
+                self.resolve_block(block.id, *block.node, None);
             }
-            AstNode::For {
+            Stmt::For {
                 variable,
                 range,
                 block,
             } => {
                 // making sure the for loop variable and body end up in the same scope frame
-                self.enter_scope(block);
-                self.define_variable(variable, false);
+                self.enter_scope(block.id);
+                self.define_variable(*variable, false);
                 let for_body_scope = self.exit_scope();
 
-                self.resolve_node(range);
+                self.resolve_expr(range.clone());
 
-                let AstNode::Block(block_id) = self.compiler.ast_nodes[block.0] else {
-                    panic!("internal error: for's body is not a block");
-                };
-
-                self.resolve_block(block, block_id, Some(for_body_scope));
+                self.resolve_block(block.id, *block.node, Some(for_body_scope));
             }
-            AstNode::Loop { block } => {
-                self.resolve_node(block);
+            Stmt::Loop { block } => {
+                self.resolve_block(block.id, *block.node, None);
             }
-            
-            AstNode::Statement(node) => self.resolve_node(node),
-            AstNode::Param { .. } => (/* seems unused for now */),
-            AstNode::Type { .. } => ( /* probably doesn't make sense to resolve? */ ),
-            AstNode::NamedValue { .. } => (/* seems unused for now */),
-            // All remaining matches do not contain NodeId => there is nothing to resolve
-            _ => (),
+            Stmt::Expr(expr) => self.resolve_expr(expr.clone()),
+            Stmt::Return(expr) => {
+                if let Some(expr) = expr {
+                    self.resolve_expr(expr.clone())
+                }
+            }
+            Stmt::Break | Stmt::Continue | Stmt::Garbage => {}
         }
     }
 
@@ -370,19 +363,19 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    pub fn resolve_call(&mut self, unbound_node_id: NodeId, parts: &[NodeId]) {
+    pub fn resolve_call(&mut self, unbound_node_id: NodeId, parts: &[ExprHandle<'a>]) {
         // Find out the potentially longest command name
         let max_name_parts = parts
             .iter()
-            .position(|part| matches!(self.compiler.ast_nodes[part.0], AstNode::Name))
+            .position(|part| matches!(part.node, Expr::String { bareword: true }))
             .expect("call does not have any name")
             + 1;
 
         // Try to find the longest matching subcommand
-        let first_start = self.compiler.spans[parts[0].0].start;
+        let first_start = self.compiler.spans[parts[0].id.0].start;
 
         for n in (0..max_name_parts).rev() {
-            let last_end = self.compiler.spans[parts[n].0].end;
+            let last_end = self.compiler.spans[parts[n].id.0].end;
             let name = self
                 .compiler
                 .get_span_contents_manual(first_start, last_end);
@@ -402,7 +395,7 @@ impl<'a> Resolver<'a> {
 
         // Resolve args
         for part in &parts[max_name_parts..] {
-            self.resolve_node(*part);
+            self.resolve_expr(part.clone());
         }
     }
 
@@ -425,7 +418,7 @@ impl<'a> Resolver<'a> {
         }
 
         for inner_node_id in &block.nodes {
-            self.resolve_node(*inner_node_id);
+            self.resolve_stmt(inner_node_id.clone());
         }
         self.exit_scope();
     }

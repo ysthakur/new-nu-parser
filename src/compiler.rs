@@ -1,7 +1,7 @@
 use bumpalo::Bump;
 
 use crate::errors::SourceError;
-use crate::parser::{AstNode, Block, ExprHandle, Handle, Node, NodeId};
+use crate::parser::{AstNode, Block, BlockHandle, Handle, Node, NodeId};
 use crate::protocol::Command;
 use crate::resolver::{DeclId, Frame, NameBindings, ScopeId, VarId, Variable};
 use crate::typechecker::{TypeId, Types};
@@ -45,7 +45,7 @@ pub struct Compiler<'a> {
     pub spans: Vec<Span>,
     pub nodes: Vec<&'a dyn Node>,
     /// The top-level expressions in each file
-    pub entry_points: Vec<ExprHandle<'a>>,
+    pub entry_points: Vec<BlockHandle<'a>>,
     pub ast_nodes: Vec<AstNode>,
     pub node_types: Vec<TypeId>,
     // node_lifetimes: Vec<AllocationLifetime>,

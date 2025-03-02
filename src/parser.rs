@@ -15,6 +15,10 @@ pub struct NodeId(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockId(pub usize);
 
+impl Node for BlockId {}
+
+pub type BlockHandle<'a> = Handle<'a, BlockId>;
+
 #[derive(Debug, Clone)]
 pub struct Block<'a> {
     pub nodes: Vec<StmtHandle<'a>>,
@@ -70,7 +74,9 @@ pub type ExprHandle<'a> = Handle<'a, Expr<'a>>;
 pub enum Expr<'a> {
     Int,
     Float,
-    String,
+    String {
+        bareword: bool,
+    },
     VarRef,
 
     // Booleans
@@ -82,11 +88,11 @@ pub enum Expr<'a> {
 
     Closure {
         params: Option<Handle<'a, Params<'a>>>,
-        block: ExprHandle<'a>,
+        block: BlockHandle<'a>,
     },
 
     Call {
-        parts: Vec<NodeId>,
+        parts: Vec<ExprHandle<'a>>,
     },
     NamedValue {
         name: NodeId,
@@ -107,7 +113,7 @@ pub enum Expr<'a> {
         rows: Vec<ExprHandle<'a>>,
     },
     Record {
-        pairs: Vec<(NodeId, ExprHandle<'a>)>,
+        pairs: Vec<(ExprHandle<'a>, ExprHandle<'a>)>,
     },
     MemberAccess {
         target: ExprHandle<'a>,
@@ -116,7 +122,7 @@ pub enum Expr<'a> {
     Block(BlockId),
     If {
         condition: ExprHandle<'a>,
-        then_block: ExprHandle<'a>,
+        then_block: BlockHandle<'a>,
         else_block: Option<ExprHandle<'a>>,
     },
     Match {
@@ -130,7 +136,7 @@ pub enum Expr<'a> {
 impl<'a> Node for Expr<'a> {
     fn bareword_like(&self) -> bool {
         match self {
-            Expr::Int | Expr::Float | Expr::VarRef | Expr::String => true,
+            Expr::Int | Expr::Float | Expr::VarRef | Expr::String { .. } => true,
             _ => false,
         }
     }
@@ -148,15 +154,15 @@ pub enum Stmt<'a> {
     },
     While {
         condition: ExprHandle<'a>,
-        block: ExprHandle<'a>,
+        block: BlockHandle<'a>,
     },
     For {
         variable: NodeId,
         range: ExprHandle<'a>,
-        block: ExprHandle<'a>,
+        block: BlockHandle<'a>,
     },
     Loop {
-        block: ExprHandle<'a>,
+        block: BlockHandle<'a>,
     },
     Return(Option<ExprHandle<'a>>),
     Break,
@@ -166,7 +172,7 @@ pub enum Stmt<'a> {
         name: NodeId,
         params: Handle<'a, Params<'a>>,
         return_ty: Option<Handle<'a, InOutTypes<'a>>>,
-        block: ExprHandle<'a>,
+        block: BlockHandle<'a>,
     },
     Alias {
         new_name: NodeId,
@@ -179,18 +185,18 @@ pub enum Stmt<'a> {
 impl<'a> Node for Stmt<'a> {}
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Params<'a>(Vec<Handle<'a, Param<'a>>>);
+pub struct Params<'a>(pub Vec<Handle<'a, Param<'a>>>);
 impl<'a> Node for Params<'a> {}
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Param<'a> {
-    name: NodeId,
-    ty: Option<TypeHandle<'a>>,
+    pub name: NodeId,
+    pub ty: Option<TypeHandle<'a>>,
 }
 impl<'a> Node for Param<'a> {}
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct InOutTypes<'a>(Vec<Handle<'a, InOutType<'a>>>);
+pub struct InOutTypes<'a>(pub Vec<Handle<'a, InOutType<'a>>>);
 impl<'a> Node for InOutTypes<'a> {}
 
 /// Input/output type pair for a command
@@ -201,14 +207,14 @@ impl<'a> Node for InOutType<'a> {}
 pub type TypeHandle<'a> = Handle<'a, Type<'a>>;
 #[derive(Debug, PartialEq, Clone)]
 pub struct Type<'a> {
-    name: NodeId,
-    params: Option<Handle<'a, TypeArgs<'a>>>,
-    optional: bool,
+    pub name: NodeId,
+    pub params: Option<Handle<'a, TypeArgs<'a>>>,
+    pub optional: bool,
 }
 impl<'a> Node for Type<'a> {}
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct TypeArgs<'a>(Vec<TypeHandle<'a>>);
+pub struct TypeArgs<'a>(pub Vec<TypeHandle<'a>>);
 impl<'a> Node for TypeArgs<'a> {}
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -498,18 +504,15 @@ impl<'a> Parser<'a> {
             Token::LSquare => self.list_or_table(),
             Token::Int => self.advance_node(Expr::Int, span),
             Token::Float => self.advance_node(Expr::Float, span),
-            Token::DoubleQuotedString => self.advance_node(Expr::String, span),
-            Token::SingleQuotedString => self.advance_node(Expr::String, span),
+            Token::DoubleQuotedString => self.advance_node(Expr::String { bareword: false }, span),
+            Token::SingleQuotedString => self.advance_node(Expr::String { bareword: false }, span),
             Token::Dollar => self.variable(),
             Token::Bareword => match self.compiler.get_span_contents_manual(span.start, span.end) {
                 b"true" => self.advance_node(Expr::True, span),
                 b"false" => self.advance_node(Expr::False, span),
                 b"null" => self.advance_node(Expr::Null, span),
                 _ => match bareword_context {
-                    BarewordContext::String => match self.tokens.peek() {
-                        (Token::Bareword, span) => self.advance_node(Expr::String, span),
-                        _ => self.my_error("expected: name", Expr::Garbage),
-                    },
+                    BarewordContext::String => self.bareword_string(),
                     BarewordContext::Call => self.call(),
                 },
             },
@@ -618,7 +621,7 @@ impl<'a> Parser<'a> {
             }
 
             if self.is_name() && is_head {
-                parts.push(self.name());
+                parts.push(self.bareword_string());
                 continue;
             }
 
@@ -626,7 +629,7 @@ impl<'a> Parser<'a> {
 
             is_head = false;
             let arg_id = self.simple_expression(BarewordContext::String);
-            parts.push(arg_id.id);
+            parts.push(arg_id);
         }
 
         let span_end = self.position();
@@ -732,7 +735,7 @@ impl<'a> Parser<'a> {
             self.colon();
             self.skip_newlines();
             let val = self.simple_expression(BarewordContext::String);
-            items.push((key.id, val));
+            items.push((key, val));
             first_pass = false;
 
             if self.is_comma() {
@@ -816,9 +819,17 @@ impl<'a> Parser<'a> {
 
     pub fn string(&mut self) -> NodeId {
         match self.tokens.peek() {
-            (Token::DoubleQuotedString, span) => self.advance_node(Expr::String, span).id,
-            (Token::SingleQuotedString, span) => self.advance_node(Expr::String, span).id,
+            (Token::DoubleQuotedString, span) | (Token::SingleQuotedString, span) => {
+                self.advance_node(Expr::String { bareword: false }, span).id
+            }
             _ => self.error("expected: string"),
+        }
+    }
+
+    pub fn bareword_string(&mut self) -> ExprHandle<'a> {
+        match self.tokens.peek() {
+            (Token::Bareword, span) => self.advance_node(Expr::String { bareword: true }, span),
+            _ => self.my_error("expected: name", Expr::Garbage),
         }
     }
 
@@ -829,7 +840,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn call_name(&mut self) -> NodeId {
+    pub fn call_name(&mut self) -> ExprHandle<'a> {
         let (mut token, mut span) = self.tokens.peek();
 
         loop {
@@ -849,7 +860,7 @@ impl<'a> Parser<'a> {
             span.end = next_span.end;
         }
 
-        self.create_node(AstNode::Name, span.start, span.end).id
+        self.create_node(Expr::String { bareword: true }, span.start, span.end)
     }
 
     pub fn has_tokens(&mut self) -> bool {
@@ -927,7 +938,9 @@ impl<'a> Parser<'a> {
             } else if self.is_keyword(b"match") {
                 self.match_expression()
             } else {
-                self.block(BlockContext::Curlies)
+                let block = self.block(BlockContext::Curlies);
+                let span = self.compiler.get_span(block.id);
+                self.create_node(Expr::Block(*block.node), span.start, span.end)
             };
             span_end = self.get_span_end(block.id);
             Some(block)
@@ -1145,7 +1158,7 @@ impl<'a> Parser<'a> {
         let name = match self.tokens.peek() {
             (Token::Bareword, span) => self.advance_node(AstNode::Name, span).id,
             (Token::DoubleQuotedString | Token::SingleQuotedString, span) => {
-                self.advance_node(Expr::String, span).id
+                self.advance_node(Expr::String { bareword: false }, span).id
             }
             _ => return self.my_error("expected def name", Stmt::Garbage),
         };
@@ -1258,7 +1271,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn block(&mut self, context: BlockContext) -> ExprHandle<'a> {
+    pub fn block(&mut self, context: BlockContext) -> BlockHandle<'a> {
         let _span = span!();
         let span_start = self.position();
 
@@ -1325,7 +1338,7 @@ impl<'a> Parser<'a> {
         let span_end = self.position();
 
         self.create_node(
-            Expr::Block(BlockId(self.compiler.blocks.len() - 1)),
+            BlockId(self.compiler.blocks.len() - 1),
             span_start,
             span_end,
         )
