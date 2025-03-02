@@ -1,5 +1,6 @@
 use std::process::exit;
 
+use bumpalo::Bump;
 use new_nu_parser::compiler::Compiler;
 use new_nu_parser::ir_generator::IrGenerator;
 use new_nu_parser::lexer::lex;
@@ -8,7 +9,8 @@ use new_nu_parser::resolver::Resolver;
 use new_nu_parser::typechecker::Typechecker;
 
 fn main() {
-    let mut compiler = Compiler::new();
+    let bump = Bump::new();
+    let mut compiler = Compiler::new(&bump);
     let mut do_print = true;
 
     for arg in std::env::args().skip(1) {

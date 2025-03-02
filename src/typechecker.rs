@@ -72,7 +72,7 @@ pub const ERROR_TYPE: TypeId = TypeId(14);
 
 pub struct Typechecker<'a> {
     /// Immutable reference to a compiler after the name binding pass
-    compiler: &'a Compiler,
+    compiler: &'a Compiler<'a>,
 
     /// Types referenced by TypeId
     types: Vec<Type>,

@@ -4,8 +4,8 @@ use crate::lexer::{Token, Tokens};
 
 use tracy_client::span;
 
-pub struct Parser {
-    pub compiler: Compiler,
+pub struct Parser<'a> {
+    pub compiler: Compiler<'a>,
     tokens: Tokens,
 }
 
@@ -16,12 +16,12 @@ pub struct NodeId(pub usize);
 pub struct BlockId(pub usize);
 
 #[derive(Debug, Clone)]
-pub struct Block {
-    pub nodes: Vec<NodeId>,
+pub struct Block<'a> {
+    pub nodes: Vec<StmtHandle<'a>>,
 }
 
-impl Block {
-    pub fn new(nodes: Vec<NodeId>) -> Block {
+impl<'a> Block<'a> {
+    pub fn new(nodes: Vec<StmtHandle<'a>>) -> Block<'a> {
         Block { nodes }
     }
 }
@@ -52,19 +52,26 @@ pub enum BarewordContext {
     Call,
 }
 
-// TODO: All nodes with Vec<...> should be moved to their own ID (like BlockId) to allow Copy trait
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub struct Handle<'a, T> {
+    pub id: NodeId,
+    pub node: &'a T,
+}
+
+pub trait Node: std::fmt::Debug {
+    fn bareword_like(&self) -> bool {
+        false
+    }
+}
+
+pub type ExprHandle<'a> = Handle<'a, Expr<'a>>;
+
 #[derive(Debug, PartialEq, Clone)]
-pub enum AstNode {
+pub enum Expr<'a> {
     Int,
     Float,
     String,
-    Name,
-    Type {
-        name: NodeId,
-        params: Option<NodeId>,
-        optional: bool,
-    },
-    Variable,
+    VarRef,
 
     // Booleans
     True,
@@ -73,7 +80,140 @@ pub enum AstNode {
     // Empty values
     Null,
 
-    // Operators
+    Closure {
+        params: Option<Handle<'a, Params<'a>>>,
+        block: ExprHandle<'a>,
+    },
+
+    Call {
+        parts: Vec<NodeId>,
+    },
+    NamedValue {
+        name: NodeId,
+        value: ExprHandle<'a>,
+    },
+    BinaryOp {
+        lhs: ExprHandle<'a>,
+        op: Handle<'a, BinOp>,
+        rhs: ExprHandle<'a>,
+    },
+    Range {
+        lhs: ExprHandle<'a>,
+        rhs: ExprHandle<'a>,
+    },
+    List(Vec<ExprHandle<'a>>),
+    Table {
+        header: ExprHandle<'a>,
+        rows: Vec<ExprHandle<'a>>,
+    },
+    Record {
+        pairs: Vec<(NodeId, ExprHandle<'a>)>,
+    },
+    MemberAccess {
+        target: ExprHandle<'a>,
+        field: NodeId,
+    },
+    Block(BlockId),
+    If {
+        condition: ExprHandle<'a>,
+        then_block: ExprHandle<'a>,
+        else_block: Option<ExprHandle<'a>>,
+    },
+    Match {
+        target: ExprHandle<'a>,
+        match_arms: Vec<(ExprHandle<'a>, ExprHandle<'a>)>,
+    },
+
+    Garbage,
+}
+
+impl<'a> Node for Expr<'a> {
+    fn bareword_like(&self) -> bool {
+        match self {
+            Expr::Int | Expr::Float | Expr::VarRef | Expr::String => true,
+            _ => false,
+        }
+    }
+}
+
+pub type StmtHandle<'a> = Handle<'a, Stmt<'a>>;
+
+#[derive(Debug, PartialEq, Clone)]
+pub enum Stmt<'a> {
+    Let {
+        variable_name: NodeId,
+        ty: Option<TypeHandle<'a>>,
+        initializer: ExprHandle<'a>,
+        is_mutable: bool,
+    },
+    While {
+        condition: ExprHandle<'a>,
+        block: ExprHandle<'a>,
+    },
+    For {
+        variable: NodeId,
+        range: ExprHandle<'a>,
+        block: ExprHandle<'a>,
+    },
+    Loop {
+        block: ExprHandle<'a>,
+    },
+    Return(Option<ExprHandle<'a>>),
+    Break,
+    Continue,
+    Expr(ExprHandle<'a>),
+    Def {
+        name: NodeId,
+        params: Handle<'a, Params<'a>>,
+        return_ty: Option<Handle<'a, InOutTypes<'a>>>,
+        block: ExprHandle<'a>,
+    },
+    Alias {
+        new_name: NodeId,
+        old_name: NodeId,
+    },
+
+    Garbage,
+}
+
+impl<'a> Node for Stmt<'a> {}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Params<'a>(Vec<Handle<'a, Param<'a>>>);
+impl<'a> Node for Params<'a> {}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Param<'a> {
+    name: NodeId,
+    ty: Option<TypeHandle<'a>>,
+}
+impl<'a> Node for Param<'a> {}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct InOutTypes<'a>(Vec<Handle<'a, InOutType<'a>>>);
+impl<'a> Node for InOutTypes<'a> {}
+
+/// Input/output type pair for a command
+#[derive(Debug, PartialEq, Clone)]
+pub struct InOutType<'a>(TypeHandle<'a>, TypeHandle<'a>);
+impl<'a> Node for InOutType<'a> {}
+
+pub type TypeHandle<'a> = Handle<'a, Type<'a>>;
+#[derive(Debug, PartialEq, Clone)]
+pub struct Type<'a> {
+    name: NodeId,
+    params: Option<Handle<'a, TypeArgs<'a>>>,
+    optional: bool,
+}
+impl<'a> Node for Type<'a> {}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct TypeArgs<'a>(Vec<TypeHandle<'a>>);
+impl<'a> Node for TypeArgs<'a> {}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum BinOp {
+    // Normal binary operators
     Pow,
     Multiply,
     Divide,
@@ -96,6 +236,7 @@ pub enum AstNode {
     Or,
 
     // Assignments
+    // TODO maybe move these into a separate enum
     Assignment,
     AddAssignment,
     SubtractAssignment,
@@ -103,52 +244,15 @@ pub enum AstNode {
     DivideAssignment,
     AppendAssignment,
 
-    // Statements
-    Let {
-        variable_name: NodeId,
-        ty: Option<NodeId>,
-        initializer: NodeId,
-        is_mutable: bool,
-    },
-    While {
-        condition: NodeId,
-        block: NodeId,
-    },
-    For {
-        variable: NodeId,
-        range: NodeId,
-        block: NodeId,
-    },
-    Loop {
-        block: NodeId,
-    },
-    Return(Option<NodeId>),
-    Break,
-    Continue,
+    Unknown,
+}
+impl Node for BinOp {}
 
-    // Definitions
-    Def {
-        name: NodeId,
-        params: NodeId,
-        return_ty: Option<NodeId>,
-        block: NodeId,
-    },
-    Params(Vec<NodeId>),
-    Param {
-        name: NodeId,
-        ty: Option<NodeId>,
-    },
-    InOutTypes(Vec<NodeId>),
-    /// Input/output type pair for a command
-    InOutType(NodeId, NodeId),
-    Closure {
-        params: Option<NodeId>,
-        block: NodeId,
-    },
-    Alias {
-        new_name: NodeId,
-        old_name: NodeId,
-    },
+// TODO: All nodes with Vec<...> should be moved to their own ID (like BlockId) to allow Copy trait
+#[derive(Debug, PartialEq, Clone)]
+pub enum AstNode {
+    Name,
+    VarDecl,
 
     /// Long flag ('--' + one or more letters)
     FlagLong,
@@ -157,83 +261,52 @@ pub enum AstNode {
     /// Group of short flags ('-' + more than 1 letters)
     FlagShortGroup,
 
-    // Expressions
-    Call {
-        parts: Vec<NodeId>,
-    },
-    NamedValue {
-        name: NodeId,
-        value: NodeId,
-    },
-    BinaryOp {
-        lhs: NodeId,
-        op: NodeId,
-        rhs: NodeId,
-    },
-    Range {
-        lhs: NodeId,
-        rhs: NodeId,
-    },
-    List(Vec<NodeId>),
-    Table {
-        header: NodeId,
-        rows: Vec<NodeId>,
-    },
-    Record {
-        pairs: Vec<(NodeId, NodeId)>,
-    },
-    MemberAccess {
-        target: NodeId,
-        field: NodeId,
-    },
-    Block(BlockId),
-    If {
-        condition: NodeId,
-        then_block: NodeId,
-        else_block: Option<NodeId>,
-    },
-    Match {
-        target: NodeId,
-        match_arms: Vec<(NodeId, NodeId)>,
-    },
-    Statement(NodeId),
     Garbage,
 }
 
-pub const ASSIGNMENT_PRECEDENCE: usize = 10;
-
-impl AstNode {
-    pub fn precedence(&self) -> usize {
+impl Node for AstNode {
+    fn bareword_like(&self) -> bool {
         match self {
-            AstNode::Pow => 100,
-            AstNode::Multiply | AstNode::Divide | AstNode::FloorDiv | AstNode::Modulo => 95,
-            AstNode::Plus | AstNode::Minus => 90,
-            AstNode::LessThan
-            | AstNode::LessThanOrEqual
-            | AstNode::GreaterThan
-            | AstNode::GreaterThanOrEqual
-            | AstNode::Equal
-            | AstNode::NotEqual
-            | AstNode::RegexMatch
-            | AstNode::NotRegexMatch
-            | AstNode::In
-            | AstNode::Append => 80,
-            AstNode::And => 50,
-            AstNode::Xor => 45,
-            AstNode::Or => 40,
-            AstNode::Assignment
-            | AstNode::AddAssignment
-            | AstNode::SubtractAssignment
-            | AstNode::MultiplyAssignment
-            | AstNode::DivideAssignment
-            | AstNode::AppendAssignment => ASSIGNMENT_PRECEDENCE,
-            _ => 0,
+            AstNode::Name | AstNode::VarDecl => true,
+            _ => false,
         }
     }
 }
 
-impl Parser {
-    pub fn new(compiler: Compiler, tokens: Tokens) -> Self {
+pub const ASSIGNMENT_PRECEDENCE: usize = 10;
+
+impl BinOp {
+    pub fn precedence(&self) -> usize {
+        match self {
+            BinOp::Pow => 100,
+            BinOp::Multiply | BinOp::Divide | BinOp::FloorDiv | BinOp::Modulo => 95,
+            BinOp::Plus | BinOp::Minus => 90,
+            BinOp::LessThan
+            | BinOp::LessThanOrEqual
+            | BinOp::GreaterThan
+            | BinOp::GreaterThanOrEqual
+            | BinOp::Equal
+            | BinOp::NotEqual
+            | BinOp::RegexMatch
+            | BinOp::NotRegexMatch
+            | BinOp::In
+            | BinOp::Append => 80,
+            BinOp::And => 50,
+            BinOp::Xor => 45,
+            BinOp::Or => 40,
+            BinOp::Assignment
+            | BinOp::AddAssignment
+            | BinOp::SubtractAssignment
+            | BinOp::MultiplyAssignment
+            | BinOp::DivideAssignment
+            | BinOp::AppendAssignment => ASSIGNMENT_PRECEDENCE,
+            BinOp::Unknown => 0,
+        }
+    }
+}
+
+impl<'a> Parser<'a> {
+    pub fn new(compiler: Compiler<'a>, tokens: Tokens) -> Self {
         Self { compiler, tokens }
     }
 
@@ -245,26 +318,27 @@ impl Parser {
         self.compiler.spans[node_id.0].end
     }
 
-    pub fn parse(mut self) -> Compiler {
+    pub fn parse(mut self) -> Compiler<'a> {
         let _span = span!();
-        self.block(BlockContext::Bare);
+        let entry = self.block(BlockContext::Bare);
+        self.compiler.entry_points.push(entry);
 
         self.compiler
     }
 
-    pub fn expression_or_assignment(&mut self) -> NodeId {
+    pub fn expression_or_assignment(&mut self) -> ExprHandle<'a> {
         let _span = span!();
         self.math_expression(true)
     }
 
-    pub fn expression(&mut self) -> NodeId {
+    pub fn expression(&mut self) -> ExprHandle<'a> {
         let _span = span!();
         self.math_expression(false)
     }
 
-    pub fn math_expression(&mut self, allow_assignment: bool) -> NodeId {
+    pub fn math_expression(&mut self, allow_assignment: bool) -> ExprHandle<'a> {
         let _span = span!();
-        let mut expr_stack = Vec::<(NodeId, NodeId)>::new();
+        let mut expr_stack = Vec::<(Handle<'a, BinOp>, ExprHandle)>::new();
 
         let mut last_prec = 1000000;
 
@@ -290,10 +364,10 @@ impl Parser {
             let op = self.operator();
 
             let rhs = self.expression();
-            let span_end = self.get_span_end(rhs);
+            let span_end = self.get_span_end(rhs.id);
 
             return self.create_node(
-                AstNode::BinaryOp {
+                Expr::BinaryOp {
                     lhs: leftmost,
                     op,
                     rhs,
@@ -310,23 +384,23 @@ impl Parser {
                 let missing_space_after_op = !self.is_horizontal_space();
 
                 if missing_space_before_op {
-                    self.error_on_node("missing space before operator", op);
+                    self.error_on_node("missing space before operator", op.id);
                 }
 
                 if missing_space_after_op {
-                    self.error_on_node("missing space after operator", op);
+                    self.error_on_node("missing space after operator", op.id);
                 }
 
-                let op_prec = self.operator_precedence(op);
+                let op_prec = op.node.precedence();
 
                 if op_prec == ASSIGNMENT_PRECEDENCE && !allow_assignment {
-                    self.error_on_node("assignment found in expression", op);
+                    self.error_on_node("assignment found in expression", op.id);
                 }
 
                 let rhs = if self.is_simple_expression() {
                     self.simple_expression(BarewordContext::Call)
                 } else {
-                    self.error("incomplete math expression")
+                    self.my_error("incomplete math expression", Expr::Garbage)
                 };
 
                 while op_prec <= last_prec {
@@ -334,21 +408,33 @@ impl Parser {
                         break;
                     };
 
-                    last_prec = self.operator_precedence(op);
+                    last_prec = op.node.precedence();
 
                     if last_prec < op_prec {
                         expr_stack.push((op, rhs));
                         break;
                     }
 
-                    let lhs = expr_stack.last_mut().map_or(&mut leftmost, |l| &mut l.1);
-
-                    let (span_start, span_end) = self.spanning(*lhs, rhs);
-                    *lhs = self.create_node(
-                        AstNode::BinaryOp { lhs: *lhs, op, rhs },
-                        span_start,
-                        span_end,
-                    );
+                    // TODO merge these two branches together like they used to be
+                    if let Some(l) = expr_stack.pop() {
+                        let lhs = l.1;
+                        let (span_start, span_end) = self.spanning(lhs.id, rhs.id);
+                        expr_stack.push((
+                            l.0,
+                            self.create_node(Expr::BinaryOp { lhs, op, rhs }, span_start, span_end),
+                        ));
+                    } else {
+                        let (span_start, span_end) = self.spanning(leftmost.id, rhs.id);
+                        leftmost = self.create_node(
+                            Expr::BinaryOp {
+                                lhs: leftmost,
+                                op,
+                                rhs,
+                            },
+                            span_start,
+                            span_end,
+                        );
+                    }
                 }
 
                 expr_stack.push((op, rhs));
@@ -360,21 +446,32 @@ impl Parser {
         }
 
         while let Some((op, rhs)) = expr_stack.pop() {
-            let lhs = expr_stack.last_mut().map_or(&mut leftmost, |l| &mut l.1);
-
-            let (span_start, span_end) = self.spanning(*lhs, rhs);
-
-            *lhs = self.create_node(
-                AstNode::BinaryOp { lhs: *lhs, op, rhs },
-                span_start,
-                span_end,
-            );
+            // TODO merge these two branches together like they used to be
+            if let Some(l) = expr_stack.pop() {
+                let lhs = l.1;
+                let (span_start, span_end) = self.spanning(lhs.id, rhs.id);
+                expr_stack.push((
+                    l.0,
+                    self.create_node(Expr::BinaryOp { lhs, op, rhs }, span_start, span_end),
+                ));
+            } else {
+                let (span_start, span_end) = self.spanning(leftmost.id, rhs.id);
+                leftmost = self.create_node(
+                    Expr::BinaryOp {
+                        lhs: leftmost,
+                        op,
+                        rhs,
+                    },
+                    span_start,
+                    span_end,
+                );
+            }
         }
 
         leftmost
     }
 
-    pub fn simple_expression(&mut self, bareword_context: BarewordContext) -> NodeId {
+    pub fn simple_expression(&mut self, bareword_context: BarewordContext) -> ExprHandle<'a> {
         let _span = span!();
 
         // skip comments and newlines
@@ -391,7 +488,7 @@ impl Parser {
             Token::LParen => {
                 self.tokens.advance();
                 if self.tokens.peek_token() == Token::RParen {
-                    self.error("use null instead of ()")
+                    self.my_error("use null instead of ()", Expr::Garbage)
                 } else {
                     let output = self.expression();
                     self.rparen();
@@ -399,25 +496,24 @@ impl Parser {
                 }
             }
             Token::LSquare => self.list_or_table(),
-            Token::Int => self.advance_node(AstNode::Int, span),
-            Token::Float => self.advance_node(AstNode::Float, span),
-            Token::DoubleQuotedString => self.advance_node(AstNode::String, span),
-            Token::SingleQuotedString => self.advance_node(AstNode::String, span),
+            Token::Int => self.advance_node(Expr::Int, span),
+            Token::Float => self.advance_node(Expr::Float, span),
+            Token::DoubleQuotedString => self.advance_node(Expr::String, span),
+            Token::SingleQuotedString => self.advance_node(Expr::String, span),
             Token::Dollar => self.variable(),
             Token::Bareword => match self.compiler.get_span_contents_manual(span.start, span.end) {
-                b"true" => self.advance_node(AstNode::True, span),
-                b"false" => self.advance_node(AstNode::False, span),
-                b"null" => self.advance_node(AstNode::Null, span),
+                b"true" => self.advance_node(Expr::True, span),
+                b"false" => self.advance_node(Expr::False, span),
+                b"null" => self.advance_node(Expr::Null, span),
                 _ => match bareword_context {
-                    BarewordContext::String => {
-                        let node_id = self.name();
-                        self.compiler.ast_nodes[node_id.0] = AstNode::String;
-                        node_id
-                    }
+                    BarewordContext::String => match self.tokens.peek() {
+                        (Token::Bareword, span) => self.advance_node(Expr::String, span),
+                        _ => self.my_error("expected: name", Expr::Garbage),
+                    },
                     BarewordContext::Call => self.call(),
                 },
             },
-            _ => self.error("incomplete expression"),
+            _ => self.my_error("incomplete expression", Expr::Garbage),
         };
 
         loop {
@@ -435,10 +531,9 @@ impl Parser {
                     return expr;
                 } else {
                     let rhs = self.simple_expression(BarewordContext::String);
-                    let span_end = self.get_span_end(rhs);
+                    let span_end = self.get_span_end(rhs.id);
 
-                    expr =
-                        self.create_node(AstNode::Range { lhs: expr, rhs }, span_start, span_end);
+                    expr = self.create_node(Expr::Range { lhs: expr, rhs }, span_start, span_end);
                 }
             } else if self.is_dot() {
                 // Member access
@@ -452,51 +547,44 @@ impl Parser {
                 let name = self.name();
 
                 let field_or_call = if self.is_lparen() {
-                    self.variable()
+                    self.variable().id
                 } else {
                     name
                 };
                 let span_end = self.get_span_end(field_or_call);
 
-                match self.compiler.get_node_mut(field_or_call) {
-                    AstNode::Variable | AstNode::Name => {
-                        expr = self.create_node(
-                            AstNode::MemberAccess {
-                                target: expr,
-                                field: field_or_call,
-                            },
-                            span_start,
-                            span_end,
-                        );
-                    }
-                    _ => {
-                        self.error("expected field");
-                    }
-                }
+                expr = self.create_node(
+                    Expr::MemberAccess {
+                        target: expr,
+                        field: field_or_call,
+                    },
+                    span_start,
+                    span_end,
+                );
             } else {
                 return expr;
             }
         }
     }
 
-    pub fn advance_node(&mut self, node: AstNode, span: Span) -> NodeId {
+    pub fn advance_node<T: Node + 'a>(&mut self, node: T, span: Span) -> Handle<'a, T> {
         self.tokens.advance();
         self.create_node(node, span.start, span.end)
     }
 
-    pub fn variable(&mut self) -> NodeId {
+    pub fn variable(&mut self) -> ExprHandle<'a> {
         if self.is_dollar() {
             let span_start = self.position();
             self.tokens.advance();
 
             if let (Token::Bareword, name_span) = self.tokens.peek() {
                 self.tokens.advance();
-                self.create_node(AstNode::Variable, span_start, name_span.end)
+                self.create_node(Expr::VarRef, span_start, name_span.end)
             } else {
-                self.error("variable name must be a bareword")
+                self.my_error("variable name must be a bareword", Expr::Garbage)
             }
         } else {
-            self.error("expected variable starting with '$'")
+            self.my_error("expected variable starting with '$'", Expr::Garbage)
         }
     }
 
@@ -511,13 +599,14 @@ impl Parser {
 
         if let (Token::Bareword, name_span) = self.tokens.peek() {
             self.tokens.advance();
-            self.create_node(AstNode::Variable, span_start, name_span.end)
+            self.create_node(AstNode::VarDecl, span_start, name_span.end)
+                .id
         } else {
             self.error("variable assignment name must be a bareword")
         }
     }
 
-    pub fn call(&mut self) -> NodeId {
+    pub fn call(&mut self) -> ExprHandle<'a> {
         let _span = span!();
         let mut parts = vec![self.call_name()];
         let mut is_head = true;
@@ -537,19 +626,19 @@ impl Parser {
 
             is_head = false;
             let arg_id = self.simple_expression(BarewordContext::String);
-            parts.push(arg_id);
+            parts.push(arg_id.id);
         }
 
         let span_end = self.position();
 
-        self.create_node(AstNode::Call { parts }, span_start, span_end)
+        self.create_node(Expr::Call { parts }, span_start, span_end)
     }
 
-    pub fn list_or_table(&mut self) -> NodeId {
+    pub fn list_or_table(&mut self) -> ExprHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         let mut is_table = false;
-        let mut items = vec![];
+        let mut items: Vec<ExprHandle> = vec![];
 
         self.lsquare();
         let mut span_end = self.position();
@@ -565,15 +654,15 @@ impl Parser {
             } else if self.is_semicolon() {
                 if items.len() != 1 {
                     self.error("semicolon to create table should immediately follow headers");
-                } else if !matches!(self.compiler.get_node(items[0]), AstNode::List(_)) {
-                    self.error_on_node("tables require a list for their headers", items[0])
+                } else if !matches!(items[0].node, Expr::List(_)) {
+                    self.error_on_node("tables require a list for their headers", items[0].id)
                 }
                 self.tokens.advance();
                 is_table = true;
             } else if self.is_simple_expression() {
                 items.push(self.simple_expression(BarewordContext::String));
             } else {
-                items.push(self.error("expected list item"));
+                items.push(self.my_error("expected list item", Expr::Garbage));
                 if self.is_eof() {
                     // prevent forever looping if there is no token to put the error on
                     break;
@@ -584,7 +673,7 @@ impl Parser {
         if is_table {
             let header = items.remove(0);
             self.create_node(
-                AstNode::Table {
+                Expr::Table {
                     header,
                     rows: items,
                 },
@@ -592,11 +681,11 @@ impl Parser {
                 span_end,
             )
         } else {
-            self.create_node(AstNode::List(items), span_start, span_end)
+            self.create_node(Expr::List(items), span_start, span_end)
         }
     }
 
-    pub fn record_or_closure(&mut self) -> NodeId {
+    pub fn record_or_closure(&mut self) -> ExprHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         let mut span_end = self.position(); // TODO: make sure we only initialize it expectedly
@@ -617,7 +706,7 @@ impl Parser {
             span_end = self.position();
 
             return self.create_node(
-                AstNode::Closure {
+                Expr::Closure {
                     params: args,
                     block,
                 },
@@ -643,7 +732,7 @@ impl Parser {
             self.colon();
             self.skip_newlines();
             let val = self.simple_expression(BarewordContext::String);
-            items.push((key, val));
+            items.push((key.id, val));
             first_pass = false;
 
             if self.is_comma() {
@@ -663,7 +752,7 @@ impl Parser {
             span_end = self.position();
 
             self.create_node(
-                AstNode::Closure {
+                Expr::Closure {
                     params: None,
                     block,
                 },
@@ -671,52 +760,51 @@ impl Parser {
                 span_end,
             )
         } else {
-            self.create_node(AstNode::Record { pairs: items }, span_start, span_end)
+            self.create_node(Expr::Record { pairs: items }, span_start, span_end)
         }
     }
 
-    pub fn operator(&mut self) -> NodeId {
+    pub fn operator(&mut self) -> Handle<'a, BinOp> {
         let (token, span) = self.tokens.peek();
 
         match token {
-            Token::Plus => self.advance_node(AstNode::Plus, span),
-            Token::PlusPlus => self.advance_node(AstNode::Append, span),
-            Token::Dash => self.advance_node(AstNode::Minus, span),
-            Token::Asterisk => self.advance_node(AstNode::Multiply, span),
-            Token::ForwardSlash => self.advance_node(AstNode::Divide, span),
-            Token::ForwardSlashForwardSlash => self.advance_node(AstNode::FloorDiv, span),
-            Token::LessThan => self.advance_node(AstNode::LessThan, span),
-            Token::LessThanEqual => self.advance_node(AstNode::LessThanOrEqual, span),
-            Token::GreaterThan => self.advance_node(AstNode::GreaterThan, span),
-            Token::GreaterThanEqual => self.advance_node(AstNode::GreaterThanOrEqual, span),
-            Token::EqualsEquals => self.advance_node(AstNode::Equal, span),
-            Token::ExclamationEquals => self.advance_node(AstNode::NotEqual, span),
-            Token::EqualsTilde => self.advance_node(AstNode::RegexMatch, span),
-            Token::ExclamationTilde => self.advance_node(AstNode::NotRegexMatch, span),
-            Token::AsteriskAsterisk => self.advance_node(AstNode::Pow, span),
-            Token::Equals => self.advance_node(AstNode::Assignment, span),
-            Token::PlusEquals => self.advance_node(AstNode::AddAssignment, span),
-            Token::DashEquals => self.advance_node(AstNode::SubtractAssignment, span),
-            Token::AsteriskEquals => self.advance_node(AstNode::MultiplyAssignment, span),
-            Token::ForwardSlashEquals => self.advance_node(AstNode::DivideAssignment, span),
-            Token::PlusPlusEquals => self.advance_node(AstNode::AppendAssignment, span),
+            Token::Plus => self.advance_node(BinOp::Plus, span),
+            Token::PlusPlus => self.advance_node(BinOp::Append, span),
+            Token::Dash => self.advance_node(BinOp::Minus, span),
+            Token::Asterisk => self.advance_node(BinOp::Multiply, span),
+            Token::ForwardSlash => self.advance_node(BinOp::Divide, span),
+            Token::ForwardSlashForwardSlash => self.advance_node(BinOp::FloorDiv, span),
+            Token::LessThan => self.advance_node(BinOp::LessThan, span),
+            Token::LessThanEqual => self.advance_node(BinOp::LessThanOrEqual, span),
+            Token::GreaterThan => self.advance_node(BinOp::GreaterThan, span),
+            Token::GreaterThanEqual => self.advance_node(BinOp::GreaterThanOrEqual, span),
+            Token::EqualsEquals => self.advance_node(BinOp::Equal, span),
+            Token::ExclamationEquals => self.advance_node(BinOp::NotEqual, span),
+            Token::EqualsTilde => self.advance_node(BinOp::RegexMatch, span),
+            Token::ExclamationTilde => self.advance_node(BinOp::NotRegexMatch, span),
+            Token::AsteriskAsterisk => self.advance_node(BinOp::Pow, span),
+            Token::Equals => self.advance_node(BinOp::Assignment, span),
+            Token::PlusEquals => self.advance_node(BinOp::AddAssignment, span),
+            Token::DashEquals => self.advance_node(BinOp::SubtractAssignment, span),
+            Token::AsteriskEquals => self.advance_node(BinOp::MultiplyAssignment, span),
+            Token::ForwardSlashEquals => self.advance_node(BinOp::DivideAssignment, span),
+            Token::PlusPlusEquals => self.advance_node(BinOp::AppendAssignment, span),
             Token::Bareword => match self.compiler.get_span_contents_manual(span.start, span.end) {
-                b"mod" => self.advance_node(AstNode::Modulo, span),
-                b"in" => self.advance_node(AstNode::In, span),
-                b"and" => self.advance_node(AstNode::And, span),
-                b"xor" => self.advance_node(AstNode::Xor, span),
-                b"or" => self.advance_node(AstNode::Or, span),
-                op => self.error(format!(
-                    "Unknown operator: '{}'",
-                    String::from_utf8_lossy(op)
-                )),
+                b"mod" => self.advance_node(BinOp::Modulo, span),
+                b"in" => self.advance_node(BinOp::In, span),
+                b"and" => self.advance_node(BinOp::And, span),
+                b"xor" => self.advance_node(BinOp::Xor, span),
+                b"or" => self.advance_node(BinOp::Or, span),
+                op => self.my_error(
+                    format!("Unknown operator: '{}'", String::from_utf8_lossy(op)),
+                    BinOp::Unknown,
+                ),
             },
-            _ => self.error("expected: operator"),
+            _ => {
+                // TODO is this case even reachable? Perhaps BinOp::Unknown is unnecessary
+                self.my_error("expected: operator", BinOp::Unknown)
+            }
         }
-    }
-
-    pub fn operator_precedence(&mut self, operator: NodeId) -> usize {
-        self.compiler.get_node(operator).precedence()
     }
 
     pub fn spanning(&mut self, from: NodeId, to: NodeId) -> (usize, usize) {
@@ -728,15 +816,15 @@ impl Parser {
 
     pub fn string(&mut self) -> NodeId {
         match self.tokens.peek() {
-            (Token::DoubleQuotedString, span) => self.advance_node(AstNode::String, span),
-            (Token::SingleQuotedString, span) => self.advance_node(AstNode::String, span),
+            (Token::DoubleQuotedString, span) => self.advance_node(Expr::String, span).id,
+            (Token::SingleQuotedString, span) => self.advance_node(Expr::String, span).id,
             _ => self.error("expected: string"),
         }
     }
 
     pub fn name(&mut self) -> NodeId {
         match self.tokens.peek() {
-            (Token::Bareword, span) => self.advance_node(AstNode::Name, span),
+            (Token::Bareword, span) => self.advance_node(AstNode::Name, span).id,
             _ => self.error("expected: name"),
         }
     }
@@ -761,14 +849,14 @@ impl Parser {
             span.end = next_span.end;
         }
 
-        self.create_node(AstNode::Name, span.start, span.end)
+        self.create_node(AstNode::Name, span.start, span.end).id
     }
 
     pub fn has_tokens(&mut self) -> bool {
         self.tokens.peek_token() != Token::Eof
     }
 
-    pub fn match_expression(&mut self) -> NodeId {
+    pub fn match_expression(&mut self) -> ExprHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         let span_end;
@@ -779,7 +867,7 @@ impl Parser {
         let mut match_arms = vec![];
 
         if !self.is_lcurly() {
-            return self.error("expected left curly brace '{'");
+            return self.my_error("expected left curly brace '{'", Expr::Garbage);
         }
 
         self.lcurly();
@@ -793,7 +881,10 @@ impl Parser {
                 let pattern = self.simple_expression(BarewordContext::String);
 
                 if !self.is_thick_arrow() {
-                    return self.error("expected thick arrow (=>) between match cases");
+                    return self.my_error(
+                        "expected thick arrow (=>) between match cases",
+                        Expr::Garbage,
+                    );
                 }
                 self.tokens.advance();
 
@@ -807,14 +898,14 @@ impl Parser {
             } else if self.is_newline() {
                 self.tokens.advance();
             } else {
-                return self.error("expected match arm in match");
+                return self.my_error("expected match arm in match", Expr::Garbage);
             }
         }
 
-        self.create_node(AstNode::Match { target, match_arms }, span_start, span_end)
+        self.create_node(Expr::Match { target, match_arms }, span_start, span_end)
     }
 
-    pub fn if_expression(&mut self) -> NodeId {
+    pub fn if_expression(&mut self) -> ExprHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         let span_end;
@@ -838,15 +929,15 @@ impl Parser {
             } else {
                 self.block(BlockContext::Curlies)
             };
-            span_end = self.get_span_end(block);
+            span_end = self.get_span_end(block.id);
             Some(block)
         } else {
-            span_end = self.get_span_end(then_block);
+            span_end = self.get_span_end(then_block.id);
             None
         };
 
         self.create_node(
-            AstNode::If {
+            Expr::If {
                 condition,
                 then_block,
                 else_block,
@@ -858,7 +949,7 @@ impl Parser {
 
     // directly ripped from `type_params` just changed delimiters
     // FIXME: simplify if appropriate
-    pub fn signature_params(&mut self, params_context: ParamsContext) -> NodeId {
+    pub fn signature_params(&mut self, params_context: ParamsContext) -> Handle<'a, Params<'a>> {
         let _span = span!();
         let span_start = self.position();
         let span_end;
@@ -901,14 +992,13 @@ impl Parser {
                 };
 
                 let name_span = self.compiler.spans[name.0];
-                let param_span_end = if let Some(ty_id) = ty {
-                    self.compiler.spans[ty_id.0].end
+                let param_span_end = if let Some(ty_id) = &ty {
+                    self.compiler.spans[ty_id.id.0].end
                 } else {
                     name_span.end
                 };
 
-                let param =
-                    self.create_node(AstNode::Param { name, ty }, name_span.start, param_span_end);
+                let param = self.create_node(Param { name, ty }, name_span.start, param_span_end);
 
                 // output.push(self.name());
                 output.push(param);
@@ -924,10 +1014,10 @@ impl Parser {
             output
         };
 
-        self.create_node(AstNode::Params(param_list), span_start, span_end)
+        self.create_node(Params(param_list), span_start, span_end)
     }
 
-    pub fn type_params(&mut self) -> NodeId {
+    pub fn type_params(&mut self) -> Handle<'a, TypeArgs<'a>> {
         let _span = span!();
         let span_start = self.position();
         let span_end;
@@ -955,10 +1045,10 @@ impl Parser {
             output
         };
 
-        self.create_node(AstNode::Params(param_list), span_start, span_end)
+        self.create_node(TypeArgs(param_list), span_start, span_end)
     }
 
-    pub fn typename(&mut self) -> NodeId {
+    pub fn typename(&mut self) -> TypeHandle<'a> {
         let _span = span!();
         if let (Token::Bareword, span) = self.tokens.peek() {
             let name = self.name();
@@ -977,7 +1067,7 @@ impl Parser {
             };
 
             self.create_node(
-                AstNode::Type {
+                Type {
                     name,
                     params,
                     optional,
@@ -986,11 +1076,21 @@ impl Parser {
                 span.end,
             )
         } else {
-            self.error("expect name")
+            let garbage = self.error("expected name");
+            let span = self.compiler.get_span(garbage);
+            self.create_node(
+                Type {
+                    name: garbage,
+                    params: None,
+                    optional: false,
+                },
+                span.start,
+                span.end,
+            )
         }
     }
 
-    pub fn in_out_type(&mut self) -> NodeId {
+    pub fn in_out_type(&mut self) -> Handle<'a, InOutType<'a>> {
         let _span = span!();
         let span_start = self.position();
 
@@ -999,10 +1099,10 @@ impl Parser {
         let out_ty = self.typename();
 
         let span_end = self.position();
-        self.create_node(AstNode::InOutType(in_ty, out_ty), span_start, span_end)
+        self.create_node(InOutType(in_ty, out_ty), span_start, span_end)
     }
 
-    pub fn in_out_types(&mut self) -> NodeId {
+    pub fn in_out_types(&mut self) -> Handle<'a, InOutTypes<'a>> {
         let _span = span!();
         self.colon();
 
@@ -1028,26 +1128,26 @@ impl Parser {
             self.rsquare();
             let span_end = self.position();
 
-            self.create_node(AstNode::InOutTypes(output), span_start, span_end)
+            self.create_node(InOutTypes(output), span_start, span_end)
         } else {
             let ty = self.in_out_type();
-            let span = self.compiler.get_span(ty);
-            self.create_node(AstNode::InOutTypes(vec![ty]), span.start, span.end)
+            let span = self.compiler.get_span(ty.id);
+            self.create_node(InOutTypes(vec![ty]), span.start, span.end)
         }
     }
 
-    pub fn def_statement(&mut self) -> NodeId {
+    pub fn def_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let span_start = self.position();
 
         self.keyword(b"def");
 
         let name = match self.tokens.peek() {
-            (Token::Bareword, span) => self.advance_node(AstNode::Name, span),
+            (Token::Bareword, span) => self.advance_node(AstNode::Name, span).id,
             (Token::DoubleQuotedString | Token::SingleQuotedString, span) => {
-                self.advance_node(AstNode::String, span)
+                self.advance_node(Expr::String, span).id
             }
-            _ => return self.error("expected def name"),
+            _ => return self.my_error("expected def name", Stmt::Garbage),
         };
 
         let params = self.signature_params(ParamsContext::Squares);
@@ -1058,10 +1158,10 @@ impl Parser {
         };
         let block = self.block(BlockContext::Curlies);
 
-        let span_end = self.get_span_end(block);
+        let span_end = self.get_span_end(block.id);
 
         self.create_node(
-            AstNode::Def {
+            Stmt::Def {
                 name,
                 params,
                 return_ty,
@@ -1073,7 +1173,7 @@ impl Parser {
     }
 
     // TODO: Deduplicate code between let/mut/const assignments
-    pub fn let_statement(&mut self) -> NodeId {
+    pub fn let_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let is_mutable = false;
         let span_start = self.position();
@@ -1095,10 +1195,10 @@ impl Parser {
 
         let initializer = self.expression();
 
-        let span_end = self.get_span_end(initializer);
+        let span_end = self.get_span_end(initializer.id);
 
         self.create_node(
-            AstNode::Let {
+            Stmt::Let {
                 variable_name,
                 ty,
                 initializer,
@@ -1110,7 +1210,7 @@ impl Parser {
     }
 
     // TODO: Deduplicate code between let/mut/const assignments
-    pub fn mut_statement(&mut self) -> NodeId {
+    pub fn mut_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let is_mutable = true;
         let span_start = self.position();
@@ -1132,10 +1232,10 @@ impl Parser {
 
         let initializer = self.expression();
 
-        let span_end = self.get_span_end(initializer);
+        let span_end = self.get_span_end(initializer.id);
 
         self.create_node(
-            AstNode::Let {
+            Stmt::Let {
                 variable_name,
                 ty,
                 initializer,
@@ -1158,7 +1258,7 @@ impl Parser {
         }
     }
 
-    pub fn block(&mut self, context: BlockContext) -> NodeId {
+    pub fn block(&mut self, context: BlockContext) -> ExprHandle<'a> {
         let _span = span!();
         let span_start = self.position();
 
@@ -1200,18 +1300,23 @@ impl Parser {
             } else {
                 let exp_span_start = self.position();
                 let expression = self.expression_or_assignment();
-                let exp_span_end = self.get_span_end(expression);
+                let exp_span_end = self.get_span_end(expression.id);
 
                 if self.is_semicolon() {
                     // This is a statement, not an expression
                     self.tokens.advance();
                     code_body.push(self.create_node(
-                        AstNode::Statement(expression),
+                        Stmt::Expr(expression),
                         exp_span_start,
                         exp_span_end,
                     ))
                 } else {
-                    code_body.push(expression);
+                    // TODO originally this pushed the expression directly
+                    code_body.push(self.create_node(
+                        Stmt::Expr(expression),
+                        exp_span_start,
+                        exp_span_end,
+                    ));
                 }
             }
         }
@@ -1220,13 +1325,13 @@ impl Parser {
         let span_end = self.position();
 
         self.create_node(
-            AstNode::Block(BlockId(self.compiler.blocks.len() - 1)),
+            Expr::Block(BlockId(self.compiler.blocks.len() - 1)),
             span_start,
             span_end,
         )
     }
 
-    pub fn while_statement(&mut self) -> NodeId {
+    pub fn while_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         self.keyword(b"while");
@@ -1239,12 +1344,12 @@ impl Parser {
 
         let condition = self.expression();
         let block = self.block(BlockContext::Curlies);
-        let span_end = self.get_span_end(block);
+        let span_end = self.get_span_end(block.id);
 
-        self.create_node(AstNode::While { condition, block }, span_start, span_end)
+        self.create_node(Stmt::While { condition, block }, span_start, span_end)
     }
 
-    pub fn for_statement(&mut self) -> NodeId {
+    pub fn for_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         self.keyword(b"for");
@@ -1254,10 +1359,10 @@ impl Parser {
 
         let range = self.simple_expression(BarewordContext::String);
         let block = self.block(BlockContext::Curlies);
-        let span_end = self.get_span_end(block);
+        let span_end = self.get_span_end(block.id);
 
         self.create_node(
-            AstNode::For {
+            Stmt::For {
                 variable,
                 range,
                 block,
@@ -1267,17 +1372,17 @@ impl Parser {
         )
     }
 
-    pub fn loop_statement(&mut self) -> NodeId {
+    pub fn loop_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         self.keyword(b"loop");
         let block = self.block(BlockContext::Curlies);
-        let span_end = self.get_span_end(block);
+        let span_end = self.get_span_end(block.id);
 
-        self.create_node(AstNode::Loop { block }, span_start, span_end)
+        self.create_node(Stmt::Loop { block }, span_start, span_end)
     }
 
-    pub fn return_statement(&mut self) -> NodeId {
+    pub fn return_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         let span_end;
@@ -1286,35 +1391,35 @@ impl Parser {
 
         let ret_val = if self.is_expression() {
             let expr = self.expression();
-            span_end = self.get_span_end(expr);
+            span_end = self.get_span_end(expr.id);
             Some(expr)
         } else {
             span_end = span_start + b"return".len();
             None
         };
 
-        self.create_node(AstNode::Return(ret_val), span_start, span_end)
+        self.create_node(Stmt::Return(ret_val), span_start, span_end)
     }
 
-    pub fn continue_statement(&mut self) -> NodeId {
+    pub fn continue_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         self.keyword(b"continue");
         let span_end = span_start + b"continue".len();
 
-        self.create_node(AstNode::Continue, span_start, span_end)
+        self.create_node(Stmt::Continue, span_start, span_end)
     }
 
-    pub fn break_statement(&mut self) -> NodeId {
+    pub fn break_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         self.keyword(b"break");
         let span_end = span_start + b"break".len();
 
-        self.create_node(AstNode::Break, span_start, span_end)
+        self.create_node(Stmt::Break, span_start, span_end)
     }
 
-    pub fn alias_statement(&mut self) -> NodeId {
+    pub fn alias_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         self.keyword(b"alias");
@@ -1330,7 +1435,7 @@ impl Parser {
             self.name()
         };
         let span_end = self.get_span_end(old_name);
-        self.create_node(AstNode::Alias { new_name, old_name }, span_start, span_end)
+        self.create_node(Stmt::Alias { new_name, old_name }, span_start, span_end)
     }
 
     pub fn is_operator(&mut self) -> bool {
@@ -1520,6 +1625,23 @@ impl Parser {
         });
     }
 
+    pub fn my_error<T: Node + 'a>(&mut self, message: impl Into<String>, node: T) -> Handle<'a, T> {
+        let (token, span) = self.tokens.peek();
+
+        if token != Token::Eof {
+            self.tokens.advance();
+        }
+
+        let node = self.create_node(node, span.start, span.end);
+        self.compiler.errors.push(SourceError {
+            message: message.into(),
+            node_id: node.id,
+            severity: Severity::Error,
+        });
+
+        node
+    }
+
     pub fn error(&mut self, message: impl Into<String>) -> NodeId {
         let (token, span) = self.tokens.peek();
 
@@ -1527,7 +1649,7 @@ impl Parser {
             self.tokens.advance();
         }
 
-        let node_id = self.create_node(AstNode::Garbage, span.start, span.end);
+        let node_id = self.create_node(AstNode::Garbage, span.start, span.end).id;
         self.compiler.errors.push(SourceError {
             message: message.into(),
             node_id,
@@ -1537,12 +1659,19 @@ impl Parser {
         node_id
     }
 
-    pub fn create_node(&mut self, ast_node: AstNode, span_start: usize, span_end: usize) -> NodeId {
-        self.compiler.spans.push(Span {
-            start: span_start,
-            end: span_end,
-        });
-        self.compiler.push_node(ast_node)
+    pub fn create_node<T: Node + 'a>(
+        &mut self,
+        ast_node: T,
+        span_start: usize,
+        span_end: usize,
+    ) -> Handle<'a, T> {
+        self.compiler.push_node(
+            ast_node,
+            Span {
+                start: span_start,
+                end: span_end,
+            },
+        )
     }
 
     pub fn lparen(&mut self) {

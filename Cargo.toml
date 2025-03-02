@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+bumpalo = "3.17"
 tracy-client = { version = "0.17.3", default-features = false } # for tracy v0.11.1
 logos = "0.15"
 nu-protocol = "0.101"

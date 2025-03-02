@@ -1,3 +1,4 @@
+use crate::parser::{Expr, ExprHandle};
 use crate::protocol::{Command, Declaration};
 use crate::{
     compiler::Compiler,
@@ -83,7 +84,7 @@ impl Default for NameBindings {
 
 pub struct Resolver<'a> {
     // Immutable reference to a compiler after the first parsing pass
-    compiler: &'a Compiler,
+    compiler: &'a Compiler<'a>,
 
     /// All scope frames ever entered, indexed by ScopeId
     pub scope: Vec<Frame>,
@@ -189,20 +190,17 @@ impl<'a> Resolver<'a> {
     }
 
     pub fn resolve(&mut self) {
-        if !self.compiler.ast_nodes.is_empty() {
-            let last = self.compiler.ast_nodes.len() - 1;
-            let last_node_id = NodeId(last);
-            self.resolve_node(last_node_id)
+        for entry in &self.compiler.entry_points {
+            self.resolve_expr(entry.clone())
         }
     }
 
-    pub fn resolve_node(&mut self, node_id: NodeId) {
-        // TODO: Move node_id param to the end, same as in typechecker
-        match self.compiler.ast_nodes[node_id.0] {
-            AstNode::Variable => self.resolve_variable(node_id),
-            AstNode::Call { ref parts } => self.resolve_call(node_id, parts),
-            AstNode::Block(block_id) => self.resolve_block(node_id, block_id, None),
-            AstNode::Closure { params, block } => {
+    pub fn resolve_expr(&mut self, expr: ExprHandle<'a>) {
+        match expr.node {
+            Expr::VarRef => self.resolve_variable(node_id),
+            Expr::Call { ref parts } => self.resolve_call(node_id, parts),
+            Expr::Block(block_id) => self.resolve_block(node_id, block_id, None),
+            Expr::Closure { params, block } => {
                 // making sure the closure parameters and body end up in the same scope frame
                 let closure_scope = if let Some(params) = params {
                     self.enter_scope(block);
@@ -218,6 +216,62 @@ impl<'a> Resolver<'a> {
 
                 self.resolve_block(block, block_id, closure_scope);
             }
+            Expr::BinaryOp { lhs, op: _, rhs } => {
+                self.resolve_node(lhs);
+                self.resolve_node(rhs);
+            }
+            Expr::Range { lhs, rhs } => {
+                self.resolve_node(lhs);
+                self.resolve_node(rhs);
+            }
+            Expr::List(ref nodes) => {
+                for node in nodes {
+                    self.resolve_node(*node);
+                }
+            }
+            Expr::Table { header, ref rows } => {
+                self.resolve_node(header);
+                for row in rows {
+                    self.resolve_node(*row);
+                }
+            }
+            Expr::Record { ref pairs } => {
+                for (key, val) in pairs {
+                    self.resolve_node(*key);
+                    self.resolve_node(*val);
+                }
+            }
+            Expr::MemberAccess { target, field } => {
+                self.resolve_node(target);
+                self.resolve_node(field);
+            }
+            Expr::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                self.resolve_node(condition);
+                self.resolve_node(then_block);
+                if let Some(block) = else_block {
+                    self.resolve_node(block);
+                }
+            }
+            Expr::Match {
+                target,
+                ref match_arms,
+            } => {
+                self.resolve_node(target);
+                for (arm_lhs, arm_rhs) in match_arms {
+                    self.resolve_node(*arm_lhs);
+                    self.resolve_node(*arm_rhs);
+                }
+            }
+        }
+    }
+
+    pub fn resolve_node(&mut self, node_id: NodeId) {
+        // TODO: Move node_id param to the end, same as in typechecker
+        match self.compiler.ast_nodes[node_id.0] {
             AstNode::Def {
                 name,
                 params,
@@ -287,56 +341,7 @@ impl<'a> Resolver<'a> {
             AstNode::Loop { block } => {
                 self.resolve_node(block);
             }
-            AstNode::BinaryOp { lhs, op: _, rhs } => {
-                self.resolve_node(lhs);
-                self.resolve_node(rhs);
-            }
-            AstNode::Range { lhs, rhs } => {
-                self.resolve_node(lhs);
-                self.resolve_node(rhs);
-            }
-            AstNode::List(ref nodes) => {
-                for node in nodes {
-                    self.resolve_node(*node);
-                }
-            }
-            AstNode::Table { header, ref rows } => {
-                self.resolve_node(header);
-                for row in rows {
-                    self.resolve_node(*row);
-                }
-            }
-            AstNode::Record { ref pairs } => {
-                for (key, val) in pairs {
-                    self.resolve_node(*key);
-                    self.resolve_node(*val);
-                }
-            }
-            AstNode::MemberAccess { target, field } => {
-                self.resolve_node(target);
-                self.resolve_node(field);
-            }
-            AstNode::If {
-                condition,
-                then_block,
-                else_block,
-            } => {
-                self.resolve_node(condition);
-                self.resolve_node(then_block);
-                if let Some(block) = else_block {
-                    self.resolve_node(block);
-                }
-            }
-            AstNode::Match {
-                target,
-                ref match_arms,
-            } => {
-                self.resolve_node(target);
-                for (arm_lhs, arm_rhs) in match_arms {
-                    self.resolve_node(*arm_lhs);
-                    self.resolve_node(*arm_rhs);
-                }
-            }
+            
             AstNode::Statement(node) => self.resolve_node(node),
             AstNode::Param { .. } => (/* seems unused for now */),
             AstNode::Type { .. } => ( /* probably doesn't make sense to resolve? */ ),

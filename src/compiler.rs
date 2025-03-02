@@ -1,5 +1,7 @@
+use bumpalo::Bump;
+
 use crate::errors::SourceError;
-use crate::parser::{AstNode, Block, NodeId};
+use crate::parser::{AstNode, Block, ExprHandle, Handle, Node, NodeId};
 use crate::protocol::Command;
 use crate::resolver::{DeclId, Frame, NameBindings, ScopeId, VarId, Variable};
 use crate::typechecker::{TypeId, Types};
@@ -37,14 +39,17 @@ impl<T> Spanned<T> {
     }
 }
 
-#[derive(Clone)]
-pub struct Compiler {
+pub struct Compiler<'a> {
+    pub bump: &'a Bump,
     // Core information, indexed by NodeId:
     pub spans: Vec<Span>,
+    pub nodes: Vec<&'a dyn Node>,
+    /// The top-level expressions in each file
+    pub entry_points: Vec<ExprHandle<'a>>,
     pub ast_nodes: Vec<AstNode>,
     pub node_types: Vec<TypeId>,
     // node_lifetimes: Vec<AllocationLifetime>,
-    pub blocks: Vec<Block>, // Blocks, indexed by BlockId
+    pub blocks: Vec<Block<'a>>, // Blocks, indexed by BlockId
     pub source: Vec<u8>,
     pub file_offsets: Vec<(String, usize, usize)>, // fname, start, end
 
@@ -74,16 +79,13 @@ pub struct Compiler {
     pub errors: Vec<SourceError>,
 }
 
-impl Default for Compiler {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Compiler {
-    pub fn new() -> Self {
+impl<'a> Compiler<'a> {
+    pub fn new(bump: &'a Bump) -> Self {
         Self {
+            bump,
             spans: vec![],
+            nodes: vec![],
+            entry_points: vec![],
             ast_nodes: vec![],
             node_types: vec![],
             blocks: vec![],
@@ -118,16 +120,13 @@ impl Compiler {
         // TODO: This should say PARSER, not COMPILER
         let mut result = "==== COMPILER ====\n".to_string();
 
-        for (idx, ast_node) in self.ast_nodes.iter().enumerate() {
+        for (idx, ast_node) in self.nodes.iter().enumerate() {
             result.push_str(&format!(
                 "{}: {:?} ({} to {})",
                 idx, ast_node, self.spans[idx].start, self.spans[idx].end
             ));
 
-            if matches!(
-                ast_node,
-                AstNode::Name | AstNode::Variable | AstNode::Int | AstNode::Float | AstNode::String
-            ) {
+            if ast_node.bareword_like() {
                 result.push_str(&format!(
                     " \"{}\"",
                     String::from_utf8_lossy(self.get_span_contents(NodeId(idx)))
@@ -186,10 +185,15 @@ impl Compiler {
         &mut self.ast_nodes[node_id.0]
     }
 
-    pub fn push_node(&mut self, ast_node: AstNode) -> NodeId {
-        self.ast_nodes.push(ast_node);
+    pub fn push_node<T: Node + 'a>(&mut self, ast_node: T, span: Span) -> Handle<'a, T> {
+        let node_ref: &'a T = self.bump.alloc(ast_node);
+        self.nodes.push(node_ref);
+        self.spans.push(span);
 
-        NodeId(self.ast_nodes.len() - 1)
+        Handle {
+            id: NodeId(self.nodes.len() - 1),
+            node: node_ref,
+        }
     }
 
     pub fn get_rollback_point(&self, token_pos: usize) -> RollbackPoint {
