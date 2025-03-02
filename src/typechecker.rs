@@ -1,6 +1,6 @@
 use crate::compiler::Compiler;
 use crate::errors::{Severity, SourceError};
-use crate::parser::{AstNode, NodeId};
+use crate::parser::{AstNode, BlockId, Expr, ExprHandle, NodeId, Stmt, StmtHandle, TypeHandle};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
@@ -166,10 +166,8 @@ impl<'a> Typechecker<'a> {
 
     /// Typecheck AST nodes, starting from the last node
     pub fn typecheck(&mut self) {
-        if !self.compiler.ast_nodes.is_empty() {
-            let last = self.compiler.ast_nodes.len() - 1;
-            let last_node_id = NodeId(last);
-            self.typecheck_node(last_node_id)
+        for entry in &self.compiler.entry_points {
+            self.typecheck_block(*entry.node);
         }
     }
 
@@ -184,31 +182,97 @@ impl<'a> Typechecker<'a> {
         self.types[type_id.0]
     }
 
-    fn typecheck_node(&mut self, node_id: NodeId) {
-        match self.compiler.ast_nodes[node_id.0] {
-            AstNode::Null => {
+    fn typecheck_block(&mut self, block_id: BlockId) {
+        for stmt in &self.compiler.blocks[block_id.0].nodes {
+            self.typecheck_stmt(stmt.clone());
+        }
+    }
+
+    fn typecheck_stmt(&mut self, stmt: StmtHandle<'a>) {
+        let node_id = stmt.id;
+        match stmt.node {
+            Stmt::Def {
+                name,
+                params,
+                return_ty,
+                block,
+            } => self.typecheck_def(name, params, return_ty, block, node_id),
+            Stmt::Alias { new_name, old_name } => self.typecheck_alias(new_name, old_name, node_id),
+            Stmt::Let {
+                variable_name,
+                ty,
+                initializer,
+                is_mutable: _,
+            } => self.typecheck_let(variable_name, ty, initializer, node_id),
+            Stmt::For {
+                variable,
+                range,
+                block,
+            } => {
+                // We don't need to typecheck variable after this
+                self.typecheck_node(range);
+
+                let var_id = self
+                    .compiler
+                    .var_resolution
+                    .get(&variable)
+                    .expect("missing resolved variable");
+                if let Type::List(type_id) = self.type_of(range) {
+                    self.variable_types[var_id.0] = type_id;
+                    self.set_node_type_id(variable, type_id);
+                } else {
+                    self.variable_types[var_id.0] = ANY_TYPE;
+                    self.set_node_type_id(variable, ERROR_TYPE);
+                    self.error("For loop range is not a list", range);
+                }
+
+                self.typecheck_node(block);
+                if self.type_id_of(block) != NONE_TYPE {
+                    self.error("Blocks in looping constructs cannot return values", block);
+                }
+
+                if self.type_id_of(node_id) != ERROR_TYPE {
+                    self.set_node_type_id(node_id, NONE_TYPE);
+                }
+            }
+            Stmt::While { condition, block } => {
+                self.typecheck_node(block);
+                if self.type_id_of(block) != NONE_TYPE {
+                    self.error("Blocks in looping constructs cannot return values", block);
+                }
+
+                self.typecheck_node(condition);
+
+                // the condition should always evaluate to a boolean
+                if self.type_of(condition) != Type::Bool {
+                    self.error("The condition for while loop is not a boolean", condition);
+                    self.set_node_type_id(node_id, ERROR_TYPE);
+                } else {
+                    self.set_node_type_id(node_id, self.type_id_of(block));
+                }
+            }
+        }
+    }
+
+    fn typecheck_node(&mut self, expr: ExprHandle<'a>) {
+        let node_id = expr.id;
+        match expr.node {
+            Expr::Null => {
                 self.set_node_type_id(node_id, NOTHING_TYPE);
             }
-            AstNode::Int => {
+            Expr::Int => {
                 self.set_node_type_id(node_id, INT_TYPE);
             }
-            AstNode::Float => {
+            Expr::Float => {
                 self.set_node_type_id(node_id, FLOAT_TYPE);
             }
-            AstNode::True | AstNode::False => {
+            Expr::True | Expr::False => {
                 self.set_node_type_id(node_id, BOOL_TYPE);
             }
-            AstNode::String => {
+            Expr::String { .. } => {
                 self.set_node_type_id(node_id, STRING_TYPE);
             }
-            AstNode::Params(ref params) => {
-                for param in params {
-                    self.typecheck_node(*param);
-                }
-                // Params are not supposed to be evaluated
-                self.set_node_type_id(node_id, FORBIDDEN_TYPE);
-            }
-            AstNode::Param { name, ty } => {
+            Expr::Param { name, ty } => {
                 if let Some(ty) = ty {
                     self.typecheck_node(ty);
 
@@ -223,7 +287,7 @@ impl<'a> Typechecker<'a> {
                     self.set_node_type_id(node_id, ANY_TYPE);
                 }
             }
-            AstNode::Type {
+            Expr::Type {
                 name,
                 params,
                 optional,
@@ -231,7 +295,7 @@ impl<'a> Typechecker<'a> {
                 let ty_id = self.typecheck_type(name, params, optional);
                 self.set_node_type_id(node_id, ty_id);
             }
-            AstNode::List(ref items) => {
+            Expr::List(ref items) => {
                 if let Some(first_id) = items.first() {
                     self.typecheck_node(*first_id);
                     let first_type = self.type_of(*first_id);
@@ -263,7 +327,7 @@ impl<'a> Typechecker<'a> {
                     self.set_node_type_id(node_id, LIST_ANY_TYPE);
                 }
             }
-            AstNode::Block(block_id) => {
+            Expr::Block(block_id) => {
                 let block = &self.compiler.blocks[block_id.0];
 
                 for inner_node_id in &block.nodes {
@@ -279,7 +343,7 @@ impl<'a> Typechecker<'a> {
 
                 self.set_node_type_id(node_id, block_type);
             }
-            AstNode::Closure { params, block } => {
+            Expr::Closure { params, block } => {
                 // TODO: input/output types
                 if let Some(params_node_id) = params {
                     self.typecheck_node(params_node_id);
@@ -288,14 +352,8 @@ impl<'a> Typechecker<'a> {
                 self.typecheck_node(block);
                 self.set_node_type_id(node_id, CLOSURE_TYPE);
             }
-            AstNode::BinaryOp { lhs, op, rhs } => self.typecheck_binary_op(lhs, op, rhs, node_id),
-            AstNode::Let {
-                variable_name,
-                ty,
-                initializer,
-                is_mutable: _,
-            } => self.typecheck_let(variable_name, ty, initializer, node_id),
-            AstNode::Variable => {
+            Expr::BinaryOp { lhs, op, rhs } => self.typecheck_binary_op(lhs, op, rhs, node_id),
+            Expr::Variable => {
                 let var_id = self
                     .compiler
                     .var_resolution
@@ -304,7 +362,7 @@ impl<'a> Typechecker<'a> {
 
                 self.set_node_type_id(node_id, self.variable_types[var_id.0]);
             }
-            AstNode::If {
+            Expr::If {
                 condition,
                 then_block,
                 else_block,
@@ -342,64 +400,8 @@ impl<'a> Typechecker<'a> {
                     self.set_node_type_id(node_id, *types.iter().next().expect("Can't be empty"));
                 }
             }
-            AstNode::Def {
-                name,
-                params,
-                return_ty,
-                block,
-            } => self.typecheck_def(name, params, return_ty, block, node_id),
-            AstNode::Alias { new_name, old_name } => {
-                self.typecheck_alias(new_name, old_name, node_id)
-            }
-            AstNode::Call { ref parts } => self.typecheck_call(parts, node_id),
-            AstNode::For {
-                variable,
-                range,
-                block,
-            } => {
-                // We don't need to typecheck variable after this
-                self.typecheck_node(range);
-
-                let var_id = self
-                    .compiler
-                    .var_resolution
-                    .get(&variable)
-                    .expect("missing resolved variable");
-                if let Type::List(type_id) = self.type_of(range) {
-                    self.variable_types[var_id.0] = type_id;
-                    self.set_node_type_id(variable, type_id);
-                } else {
-                    self.variable_types[var_id.0] = ANY_TYPE;
-                    self.set_node_type_id(variable, ERROR_TYPE);
-                    self.error("For loop range is not a list", range);
-                }
-
-                self.typecheck_node(block);
-                if self.type_id_of(block) != NONE_TYPE {
-                    self.error("Blocks in looping constructs cannot return values", block);
-                }
-
-                if self.type_id_of(node_id) != ERROR_TYPE {
-                    self.set_node_type_id(node_id, NONE_TYPE);
-                }
-            }
-            AstNode::While { condition, block } => {
-                self.typecheck_node(block);
-                if self.type_id_of(block) != NONE_TYPE {
-                    self.error("Blocks in looping constructs cannot return values", block);
-                }
-
-                self.typecheck_node(condition);
-
-                // the condition should always evaluate to a boolean
-                if self.type_of(condition) != Type::Bool {
-                    self.error("The condition for while loop is not a boolean", condition);
-                    self.set_node_type_id(node_id, ERROR_TYPE);
-                } else {
-                    self.set_node_type_id(node_id, self.type_id_of(block));
-                }
-            }
-            AstNode::Match {
+            Expr::Call { ref parts } => self.typecheck_call(parts, node_id),
+            Expr::Match {
                 ref target,
                 ref match_arms,
             } => {
@@ -764,13 +766,8 @@ impl<'a> Typechecker<'a> {
         self.set_node_type_id(node_id, NONE_TYPE);
     }
 
-    fn typecheck_type(
-        &mut self,
-        name_id: NodeId,
-        params_id: Option<NodeId>,
-        _optional: bool,
-    ) -> TypeId {
-        let name = self.compiler.get_span_contents(name_id);
+    fn typecheck_type(&mut self, ty: TypeHandle<'a>) -> TypeId {
+        let name = self.compiler.get_span_contents(ty.node.name);
 
         // taken from parse_shape_name() in Nushell:
         match name {
@@ -778,24 +775,25 @@ impl<'a> Typechecker<'a> {
             // b"binary" => SyntaxShape::Binary,
             // b"block" => // not possible to pass blocks
             b"list" => {
-                if let Some(params_id) = params_id {
-                    self.typecheck_node(params_id);
+                if let Some(args_handle) = ty.node.params {
+                    let arg_ids = args_handle
+                        .node
+                        .0
+                        .iter()
+                        .map(|arg| self.typecheck_type(*arg))
+                        .collect::<Vec<_>>();
 
-                    if let AstNode::Params(params) = self.compiler.get_node(params_id) {
-                        if params.len() > 1 {
-                            let types =
-                                String::from_utf8_lossy(self.compiler.get_span_contents(params_id));
-                            self.error(format!("list must have only one type parameter (to allow selection of types, use oneof{} -- WIP)", types), params_id);
-                            self.push_type(Type::List(UNKNOWN_TYPE))
-                        } else if params.is_empty() {
-                            self.error("list must have one type parameter", params_id);
-                            self.push_type(Type::List(UNKNOWN_TYPE))
-                        } else {
-                            let params_ty_id = self.type_id_of(params[0]);
-                            self.push_type(Type::List(params_ty_id))
-                        }
+                    if arg_ids.len() > 1 {
+                        let types = String::from_utf8_lossy(
+                            self.compiler.get_span_contents(args_handle.id),
+                        );
+                        self.error(format!("list must have only one type parameter (to allow selection of types, use oneof{} -- WIP)", types), params);
+                        self.push_type(Type::List(UNKNOWN_TYPE))
+                    } else if arg_ids.is_empty() {
+                        self.error("list must have one type parameter", args_handle.id);
+                        self.push_type(Type::List(UNKNOWN_TYPE))
                     } else {
-                        panic!("params are not params");
+                        self.push_type(Type::List(arg_ids[0]))
                     }
                 } else {
                     LIST_ANY_TYPE
