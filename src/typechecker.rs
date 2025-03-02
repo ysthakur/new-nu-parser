@@ -70,12 +70,28 @@ pub const LIST_ANY_TYPE: TypeId = TypeId(12);
 pub const BYTE_STREAM_TYPE: TypeId = TypeId(13);
 pub const ERROR_TYPE: TypeId = TypeId(14);
 
+pub struct ExVarId(pub usize);
+
+pub enum CtxPart {
+    Bind { var_name: NodeId, ty: TypeId },
+    UnivVarIntro, // todo
+    UnivVarSet, // todo
+    ExVarIntro(ExVarId),
+    ExVarSet {
+        var: ExVarId,
+        bound: TypeId,
+    },
+    Marker(ExVarId),
+}
+
 pub struct Typechecker<'a> {
     /// Immutable reference to a compiler after the name binding pass
     compiler: &'a Compiler,
 
     /// Types referenced by TypeId
     types: Vec<Type>,
+    /// Existential type variables referenced by ExVarId
+    ex_vars: Vec<()>,
 
     /// Types of nodes. Each type in this vector matches a node in compiler.ast_nodes at the same position.
     pub node_types: Vec<TypeId>,
@@ -111,6 +127,7 @@ impl<'a> Typechecker<'a> {
                 Type::Stream(BINARY_TYPE),
                 Type::Error,
             ],
+            ex_vars: vec![],
             node_types: vec![UNKNOWN_TYPE; compiler.ast_nodes.len()],
             oneof_types: Vec::new(),
             variable_types: vec![UNKNOWN_TYPE; compiler.variables.len()],
