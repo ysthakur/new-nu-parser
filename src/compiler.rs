@@ -39,11 +39,8 @@ impl<T> Spanned<T> {
     }
 }
 
-pub struct Compiler<'a> {
-    pub bump: &'a Bump,
-    // Core information, indexed by NodeId:
-    pub spans: Vec<Span>,
-    pub nodes: Vec<&'a dyn Node>,
+pub struct Compiler {
+    pub bump: Bump,
     /// The top-level expressions in each file
     pub entry_points: Vec<BlockHandle<'a>>,
     pub node_types: Vec<TypeId>,
@@ -78,12 +75,10 @@ pub struct Compiler<'a> {
     pub errors: Vec<SourceError>,
 }
 
-impl<'a> Compiler<'a> {
-    pub fn new(bump: &'a Bump) -> Self {
+impl Compiler {
+    pub fn new() -> Self {
         Self {
-            bump,
-            spans: vec![],
-            nodes: vec![],
+            bump: Bump::new(),
             entry_points: vec![],
             node_types: vec![],
             blocks: vec![],
@@ -118,31 +113,31 @@ impl<'a> Compiler<'a> {
         // TODO: This should say PARSER, not COMPILER
         let mut result = "==== COMPILER ====\n".to_string();
 
-        for (idx, ast_node) in self.nodes.iter().enumerate() {
-            result.push_str(&format!(
-                "{}: {:?} ({} to {})",
-                idx, ast_node, self.spans[idx].start, self.spans[idx].end
-            ));
+        // for (idx, ast_node) in self.nodes.iter().enumerate() {
+        //     result.push_str(&format!(
+        //         "{}: {:?} ({} to {})",
+        //         idx, ast_node, self.spans[idx].start, self.spans[idx].end
+        //     ));
 
-            if ast_node.bareword_like() {
-                result.push_str(&format!(
-                    " \"{}\"",
-                    String::from_utf8_lossy(self.get_span_contents(NodeId(idx)))
-                ));
-            }
+        //     if ast_node.bareword_like() {
+        //         result.push_str(&format!(
+        //             " \"{}\"",
+        //             String::from_utf8_lossy(self.get_span_contents(NodeId(idx)))
+        //         ));
+        //     }
 
-            result.push('\n');
-        }
+        //     result.push('\n');
+        // }
 
-        if !self.errors.is_empty() {
-            result.push_str("==== COMPILER ERRORS ====\n");
-            for error in &self.errors {
-                result.push_str(&format!(
-                    "{:?} (NodeId {}): {}\n",
-                    error.severity, error.node_id.0, error.message
-                ));
-            }
-        }
+        // if !self.errors.is_empty() {
+        //     result.push_str("==== COMPILER ERRORS ====\n");
+        //     for error in &self.errors {
+        //         result.push_str(&format!(
+        //             "{:?} (NodeId {}): {}\n",
+        //             error.severity, error.node_id.0, error.message
+        //         ));
+        //     }
+        // }
 
         result
     }
@@ -175,15 +170,9 @@ impl<'a> Compiler<'a> {
         self.source.len()
     }
 
-    pub fn push_node<T: Node + 'a>(&mut self, ast_node: T, span: Span) -> Handle<'a, T> {
-        let node_ref: &'a T = self.bump.alloc(ast_node);
-        self.nodes.push(node_ref);
-        self.spans.push(span);
-
-        Handle {
-            id: NodeId(self.nodes.len() - 1),
-            node: node_ref,
-        }
+    // TODO This could be &mut T if necessary
+    pub fn push_node<'a, T>(&'a self, ast_node: T) -> &'a T {
+        self.bump.alloc(ast_node)
     }
 
     pub fn get_rollback_point(&self, token_pos: usize) -> RollbackPoint {
