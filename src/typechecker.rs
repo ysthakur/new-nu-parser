@@ -79,7 +79,7 @@ pub struct Typechecker<'a> {
     /// Types referenced by TypeId
     types: Vec<Type>,
 
-    /// Types of nodes. Each type in this vector matches a node in compiler.ast_nodes at the same position.
+    /// Types of nodes. Each type in this vector matches a node in compiler.nodes at the same position.
     pub node_types: Vec<TypeId>,
     /// Types used for `OneOf`. Each value in this vector matches with the index in OneOfId
     pub oneof_types: Vec<HashSet<TypeId>>,
@@ -113,7 +113,7 @@ impl<'a> Typechecker<'a> {
                 Type::Stream(BINARY_TYPE),
                 Type::Error,
             ],
-            node_types: vec![UNKNOWN_TYPE; compiler.ast_nodes.len()],
+            node_types: vec![UNKNOWN_TYPE; compiler.nodes.len()],
             oneof_types: Vec::new(),
             variable_types: vec![UNKNOWN_TYPE; compiler.variables.len()],
             decl_types: vec![
@@ -199,6 +199,7 @@ impl<'a> Typechecker<'a> {
 
     fn typecheck_stmt(&mut self, stmt: StmtHandle<'a>) {
         let node_id = stmt.id;
+        self.set_node_type_id(node_id, NONE_TYPE);
         match stmt.node {
             Stmt::Def(def) => self.typecheck_def(def.clone(), node_id),
             Stmt::Alias { new_name, old_name } => {
@@ -264,9 +265,23 @@ impl<'a> Typechecker<'a> {
                     self.set_node_type_id(node_id, block_ty);
                 }
             }
-            Stmt::Loop { block } => todo!(),
-            Stmt::Return(handle) => todo!(),
-            Stmt::Expr(handle) => todo!(),
+            Stmt::Loop { block } => {
+                let block_ty = self.typecheck_block(*block.node);
+                if block_ty != NONE_TYPE {
+                    self.error(
+                        "Blocks in looping constructs cannot return values",
+                        block.id,
+                    );
+                }
+            }
+            Stmt::Return(expr) => {
+                if let Some(expr) = expr {
+                    self.typecheck_expr(expr.clone());
+                }
+            }
+            Stmt::Expr(expr) => {
+                self.typecheck_expr(expr.clone());
+            }
             Stmt::Break | Stmt::Continue | Stmt::Garbage => {}
         }
     }
@@ -310,6 +325,18 @@ impl<'a> Typechecker<'a> {
                 } else {
                     self.set_node_type_id(node_id, LIST_ANY_TYPE)
                 }
+            }
+            Expr::Record { pairs } => {
+                // TODO
+                UNKNOWN_TYPE
+            }
+            Expr::Table { header, rows } => {
+                // TODO
+                UNKNOWN_TYPE
+            }
+            Expr::Range { lhs, rhs } => {
+                // TODO
+                UNKNOWN_TYPE
             }
             Expr::Block(block_id) => {
                 let block_ty = self.typecheck_block(*block_id);
@@ -401,11 +428,8 @@ impl<'a> Typechecker<'a> {
                 }
             }
             Expr::NamedValue { name, value } => todo!(),
-            Expr::Range { lhs, rhs } => todo!(),
-            Expr::Table { header, rows } => todo!(),
-            Expr::Record { pairs } => todo!(),
             Expr::MemberAccess { target, field } => todo!(),
-            Expr::Garbage => todo!(),
+            Expr::Garbage => ERROR_TYPE,
         }
     }
 

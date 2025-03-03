@@ -33,14 +33,14 @@ impl<'a> IrGenerator<'a> {
     /// Generates the IR from the given state of the compiler.
     /// After this is called, use `block` and `errors` to get the result.
     pub fn generate(&mut self) {
-        if self.compiler.ast_nodes.is_empty() {
-            return;
-        }
-        let node_id = NodeId(self.compiler.ast_nodes.len() - 1);
-        let Some(reg) = self.generate_node(node_id) else {
-            return;
-        };
-        self.add_instruction(node_id, Instruction::Return { src: reg });
+        // if self.compiler.ast_nodes.is_empty() {
+        //     return;
+        // }
+        // let node_id = NodeId(self.compiler.ast_nodes.len() - 1);
+        // let Some(reg) = self.generate_node(node_id) else {
+        //     return;
+        // };
+        // self.add_instruction(node_id, Instruction::Return { src: reg });
     }
 
     /// Returns generated IR block.
@@ -95,48 +95,50 @@ impl<'a> IrGenerator<'a> {
     }
 
     fn generate_node(&mut self, node_id: NodeId) -> Option<RegId> {
-        let ast_node = &self.compiler.ast_nodes[node_id.0];
-        match ast_node {
-            AstNode::Int => {
-                let next_reg = self.next_register();
-                let val = self.compiler.node_as_i64(node_id);
-                self.add_instruction(
-                    node_id,
-                    Instruction::LoadLiteral {
-                        dst: next_reg,
-                        lit: Literal::Int(val),
-                    },
-                );
-                Some(next_reg)
-            }
-            AstNode::Block(block_id) => {
-                let block = &self.compiler.blocks[block_id.0];
-                let mut last = None;
-                for id in &block.nodes {
-                    last = self.generate_node(*id);
-                    last?;
-                }
-                last
-            }
-            AstNode::BinaryOp { lhs, op, rhs } => {
-                let l = self.generate_node(*lhs)?;
-                let r = self.generate_node(*rhs)?;
-                let o = self.node_to_operator(*op)?;
-                self.add_instruction(
-                    node_id,
-                    Instruction::BinaryOp {
-                        lhs_dst: l,
-                        op: o,
-                        rhs: r,
-                    },
-                );
-                Some(l)
-            }
-            _ => {
-                self.error(format!("node {:?} not suported yet", ast_node), node_id);
-                None
-            }
-        }
+        // let ast_node = &self.compiler.ast_nodes[node_id.0];
+        // match ast_node {
+        //     AstNode::Int => {
+        //         let next_reg = self.next_register();
+        //         let val = self.compiler.node_as_i64(node_id);
+        //         self.add_instruction(
+        //             node_id,
+        //             Instruction::LoadLiteral {
+        //                 dst: next_reg,
+        //                 lit: Literal::Int(val),
+        //             },
+        //         );
+        //         Some(next_reg)
+        //     }
+        //     AstNode::Block(block_id) => {
+        //         let block = &self.compiler.blocks[block_id.0];
+        //         let mut last = None;
+        //         for id in &block.nodes {
+        //             last = self.generate_node(*id);
+        //             last?;
+        //         }
+        //         last
+        //     }
+        //     AstNode::BinaryOp { lhs, op, rhs } => {
+        //         let l = self.generate_node(*lhs)?;
+        //         let r = self.generate_node(*rhs)?;
+        //         let o = self.node_to_operator(*op)?;
+        //         self.add_instruction(
+        //             node_id,
+        //             Instruction::BinaryOp {
+        //                 lhs_dst: l,
+        //                 op: o,
+        //                 rhs: r,
+        //             },
+        //         );
+        //         Some(l)
+        //     }
+        //     _ => {
+        //         self.error(format!("node {:?} not suported yet", ast_node), node_id);
+        //         None
+        //     }
+        // }
+
+        None
     }
 
     fn add_instruction(&mut self, node_id: NodeId, instruction: Instruction) {
@@ -150,14 +152,15 @@ impl<'a> IrGenerator<'a> {
     }
 
     fn node_to_operator(&mut self, node_id: NodeId) -> Option<Operator> {
-        match self.compiler.get_node(node_id) {
-            AstNode::Plus => Some(Operator::Math(Math::Plus)),
-            AstNode::Multiply => Some(Operator::Math(Math::Multiply)),
-            node => {
-                self.error(format!("unrecognized operator {:?}", node), node_id);
-                None
-            }
-        }
+        // match self.compiler.get_node(node_id) {
+        //     // AstNode::Plus => Some(Operator::Math(Math::Plus)),
+        //     // AstNode::Multiply => Some(Operator::Math(Math::Multiply)),
+        //     node => {
+        //         self.error(format!("unrecognized operator {:?}", node), node_id);
+        //         None
+        //     }
+        // }
+        None
     }
 
     fn error(&mut self, message: impl Into<String>, node_id: NodeId) {

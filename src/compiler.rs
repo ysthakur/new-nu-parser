@@ -46,7 +46,6 @@ pub struct Compiler<'a> {
     pub nodes: Vec<&'a dyn Node>,
     /// The top-level expressions in each file
     pub entry_points: Vec<BlockHandle<'a>>,
-    pub ast_nodes: Vec<AstNode>,
     pub node_types: Vec<TypeId>,
     // node_lifetimes: Vec<AllocationLifetime>,
     pub blocks: Vec<Block<'a>>, // Blocks, indexed by BlockId
@@ -86,7 +85,6 @@ impl<'a> Compiler<'a> {
             spans: vec![],
             nodes: vec![],
             entry_points: vec![],
-            ast_nodes: vec![],
             node_types: vec![],
             blocks: vec![],
             source: vec![],
@@ -177,14 +175,6 @@ impl<'a> Compiler<'a> {
         self.source.len()
     }
 
-    pub fn get_node(&self, node_id: NodeId) -> &AstNode {
-        &self.ast_nodes[node_id.0]
-    }
-
-    pub fn get_node_mut(&mut self, node_id: NodeId) -> &mut AstNode {
-        &mut self.ast_nodes[node_id.0]
-    }
-
     pub fn push_node<T: Node + 'a>(&mut self, ast_node: T, span: Span) -> Handle<'a, T> {
         let node_ref: &'a T = self.bump.alloc(ast_node);
         self.nodes.push(node_ref);
@@ -199,7 +189,7 @@ impl<'a> Compiler<'a> {
     pub fn get_rollback_point(&self, token_pos: usize) -> RollbackPoint {
         RollbackPoint {
             idx_span_start: self.spans.len(),
-            idx_nodes: self.ast_nodes.len(),
+            idx_nodes: self.nodes.len(),
             idx_errors: self.errors.len(),
             idx_blocks: self.blocks.len(),
             token_pos,
@@ -208,7 +198,7 @@ impl<'a> Compiler<'a> {
 
     pub fn apply_compiler_rollback(&mut self, rbp: RollbackPoint) -> usize {
         self.blocks.truncate(rbp.idx_blocks);
-        self.ast_nodes.truncate(rbp.idx_nodes);
+        self.nodes.truncate(rbp.idx_nodes);
         self.errors.truncate(rbp.idx_errors);
         self.spans.truncate(rbp.idx_span_start);
 

@@ -1,3 +1,5 @@
+use std::fmt::{Display, Write};
+
 use crate::compiler::{Compiler, RollbackPoint, Span};
 use crate::errors::{Severity, SourceError};
 use crate::lexer::{Token, Tokens};
@@ -56,10 +58,16 @@ pub enum BarewordContext {
     Call,
 }
 
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy)]
 pub struct Handle<'a, T> {
     pub id: NodeId,
     pub node: &'a T,
+}
+
+impl<'a, T> std::fmt::Debug for Handle<'a, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!("Handle({})", self.id.0))
+    }
 }
 
 pub trait Node: std::fmt::Debug {
