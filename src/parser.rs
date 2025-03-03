@@ -142,6 +142,14 @@ impl<'a> Node for Expr<'a> {
     }
 }
 
+#[derive(Debug, PartialEq, Clone)]
+pub struct Def<'a> {
+    pub name: NodeId,
+    pub params: Handle<'a, Params<'a>>,
+    pub return_ty: Option<Handle<'a, InOutTypes<'a>>>,
+    pub block: BlockHandle<'a>,
+}
+
 pub type StmtHandle<'a> = Handle<'a, Stmt<'a>>;
 
 #[derive(Debug, PartialEq, Clone)]
@@ -168,12 +176,7 @@ pub enum Stmt<'a> {
     Break,
     Continue,
     Expr(ExprHandle<'a>),
-    Def {
-        name: NodeId,
-        params: Handle<'a, Params<'a>>,
-        return_ty: Option<Handle<'a, InOutTypes<'a>>>,
-        block: BlockHandle<'a>,
-    },
+    Def(Def<'a>),
     Alias {
         new_name: NodeId,
         old_name: NodeId,
@@ -181,7 +184,6 @@ pub enum Stmt<'a> {
 
     Garbage,
 }
-
 impl<'a> Node for Stmt<'a> {}
 
 #[derive(Debug, PartialEq, Clone)]
@@ -201,7 +203,7 @@ impl<'a> Node for InOutTypes<'a> {}
 
 /// Input/output type pair for a command
 #[derive(Debug, PartialEq, Clone)]
-pub struct InOutType<'a>(TypeHandle<'a>, TypeHandle<'a>);
+pub struct InOutType<'a>(pub TypeHandle<'a>, pub TypeHandle<'a>);
 impl<'a> Node for InOutType<'a> {}
 
 pub type TypeHandle<'a> = Handle<'a, Type<'a>>;
@@ -1174,12 +1176,12 @@ impl<'a> Parser<'a> {
         let span_end = self.get_span_end(block.id);
 
         self.create_node(
-            Stmt::Def {
+            Stmt::Def(Def {
                 name,
                 params,
                 return_ty,
                 block,
-            },
+            }),
             span_start,
             span_end,
         )

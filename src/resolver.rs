@@ -1,4 +1,4 @@
-use crate::parser::{Expr, ExprHandle, Stmt, StmtHandle};
+use crate::parser::{Def, Expr, ExprHandle, Stmt, StmtHandle};
 use crate::protocol::{Command, Declaration};
 use crate::{
     compiler::Compiler,
@@ -280,12 +280,12 @@ impl<'a> Resolver<'a> {
 
     pub fn resolve_stmt(&mut self, stmt: StmtHandle<'a>) {
         match stmt.node {
-            Stmt::Def {
+            Stmt::Def(Def {
                 name,
                 params,
                 return_ty: _,
                 block,
-            } => {
+            }) => {
                 // define the command before the block to enable recursive calls
                 self.define_decl(*name);
 

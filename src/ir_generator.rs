@@ -8,7 +8,7 @@ use nu_protocol::{RegId, Span};
 /// Generates IR (Intermediate Representation) from nu AST.
 pub struct IrGenerator<'a> {
     // Immutable reference to a compiler after the typechecker pass
-    compiler: &'a Compiler,
+    compiler: &'a Compiler<'a>,
     errors: Vec<SourceError>,
     block: IrBlock,
 }
