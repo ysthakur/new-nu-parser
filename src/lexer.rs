@@ -468,7 +468,7 @@ pub enum Token {
     Eof,
 }
 
-fn match_subexpression<'a, T: Logos<'a>>(
+fn match_subexpression<'a, T: Logos>(
     remainder: &[u8],
     lexer: &mut Lexer<'a, T>,
 ) -> Result<(), LexError> {

@@ -1,11 +1,13 @@
 use bumpalo::Bump;
 
 use crate::errors::SourceError;
-use crate::parser::{AstNode, Block, BlockHandle, Handle, Node, NodeId};
+use crate::parser::{Block, BlockHandle};
 use crate::protocol::Command;
 use crate::resolver::{DeclId, Frame, NameBindings, ScopeId, VarId, Variable};
 use crate::typechecker::{TypeId, Types};
+use std::any::Any;
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
 pub struct RollbackPoint {
     idx_span_start: usize,
@@ -39,16 +41,36 @@ impl<T> Spanned<T> {
     }
 }
 
-pub struct Compiler<'a> {
-    pub bump: &'a Bump,
+pub trait Node: std::fmt::Debug {
+    fn bareword_like(&self) -> bool {
+        false
+    }
+
+    fn as_any(&self) -> &dyn Any;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeId<T> {
+    pub id: usize,
+    phantom: PhantomData<T>,
+}
+
+impl<T> std::fmt::Debug for NodeId<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!("Handle({})", self.id))
+    }
+}
+
+pub struct Compiler {
+    pub bump: Bump,
     // Core information, indexed by NodeId:
     pub spans: Vec<Span>,
-    pub nodes: Vec<&'a dyn Node>,
+    pub nodes: Vec<bumpalo::boxed::Box<'static, dyn Node>>,
     /// The top-level expressions in each file
-    pub entry_points: Vec<BlockHandle<'a>>,
+    pub entry_points: Vec<BlockHandle>,
     pub node_types: Vec<TypeId>,
     // node_lifetimes: Vec<AllocationLifetime>,
-    pub blocks: Vec<Block<'a>>, // Blocks, indexed by BlockId
+    pub blocks: Vec<Block>, // Blocks, indexed by BlockId
     pub source: Vec<u8>,
     pub file_offsets: Vec<(String, usize, usize)>, // fname, start, end
 
@@ -60,11 +82,11 @@ pub struct Compiler<'a> {
     /// Variables, indexed by VarId
     pub variables: Vec<Variable>,
     /// Mapping of variable's name node -> Variable
-    pub var_resolution: HashMap<NodeId, VarId>,
+    pub var_resolution: HashMap<NodeId<()>, VarId>,
     /// Declarations (commands, aliases, externs), indexed by VarId
     pub decls: Vec<Box<dyn Command>>,
     /// Mapping of decl's name node -> Command
-    pub decl_resolution: HashMap<NodeId, DeclId>,
+    pub decl_resolution: HashMap<NodeId<()>, DeclId>,
 
     // Definitions:
     // indexed by FunId
@@ -78,10 +100,10 @@ pub struct Compiler<'a> {
     pub errors: Vec<SourceError>,
 }
 
-impl<'a> Compiler<'a> {
-    pub fn new(bump: &'a Bump) -> Self {
+impl Compiler {
+    pub fn new() -> Self {
         Self {
-            bump,
+            bump: Bump::new(),
             spans: vec![],
             nodes: vec![],
             entry_points: vec![],
@@ -127,7 +149,10 @@ impl<'a> Compiler<'a> {
             if ast_node.bareword_like() {
                 result.push_str(&format!(
                     " \"{}\"",
-                    String::from_utf8_lossy(self.get_span_contents(NodeId(idx)))
+                    String::from_utf8_lossy(self.get_span_contents(NodeId {
+                        id: idx,
+                        phantom: PhantomData
+                    }))
                 ));
             }
 
@@ -175,14 +200,19 @@ impl<'a> Compiler<'a> {
         self.source.len()
     }
 
-    pub fn push_node<T: Node + 'a>(&mut self, ast_node: T, span: Span) -> Handle<'a, T> {
-        let node_ref: &'a T = self.bump.alloc(ast_node);
-        self.nodes.push(node_ref);
+    pub fn get_node<T: Node>(&self, node_id: NodeId<T>) -> T {
+        let node = self.nodes[node_id.id];
+        let any = node.as_any();
+    }
+
+    pub fn push_node<T: Node>(&mut self, node: T, span: Span) -> NodeId<T> {
+        let node_box = bumpalo::boxed::Box::new_in(node, &self.bump);
+        self.nodes.push(node_box);
         self.spans.push(span);
 
-        Handle {
-            id: NodeId(self.nodes.len() - 1),
-            node: node_ref,
+        NodeId {
+            id: self.nodes.len() - 1,
+            phantom: PhantomData,
         }
     }
 
@@ -206,7 +236,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Get span of node
-    pub fn get_span(&self, node_id: NodeId) -> Span {
+    pub fn get_span<T>(&self, node_id: NodeId<T>) -> Span {
         *self
             .spans
             .get(node_id.0)
@@ -214,7 +244,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Get the source contents of a span of a node
-    pub fn get_span_contents(&self, node_id: NodeId) -> &[u8] {
+    pub fn get_span_contents<T>(&self, node_id: NodeId<T>) -> &[u8] {
         let span = self.get_span(node_id);
         self.source
             .get(span.start..span.end)
@@ -229,13 +259,13 @@ impl<'a> Compiler<'a> {
     }
 
     /// Get the source contents of a node
-    pub fn node_as_str(&self, node_id: NodeId) -> &str {
+    pub fn node_as_str<T>(&self, node_id: NodeId<T>) -> &str {
         std::str::from_utf8(self.get_span_contents(node_id))
             .expect("internal error: expected utf8 string")
     }
 
     /// Get the source contents of a node as i64
-    pub fn node_as_i64(&self, node_id: NodeId) -> i64 {
+    pub fn node_as_i64<T>(&self, node_id: NodeId<T>) -> i64 {
         self.node_as_str(node_id)
             .parse::<i64>()
             .expect("internal error: expected i64")

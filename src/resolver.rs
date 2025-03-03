@@ -1,9 +1,9 @@
 use crate::parser::{Def, Expr, ExprHandle, Stmt, StmtHandle};
 use crate::protocol::{Command, Declaration};
 use crate::{
-    compiler::Compiler,
+    compiler::{Compiler, NodeId},
     errors::{Severity, SourceError},
-    parser::{BlockId, NodeId},
+    parser::BlockId,
 };
 use std::collections::HashMap;
 
@@ -23,14 +23,14 @@ pub enum FrameType {
 #[derive(Debug, Clone)]
 pub struct Frame {
     pub frame_type: FrameType,
-    pub variables: HashMap<Vec<u8>, NodeId>,
-    pub decls: HashMap<Vec<u8>, NodeId>,
+    pub variables: HashMap<Vec<u8>, NodeId<()>>,
+    pub decls: HashMap<Vec<u8>, NodeId<()>>,
     /// Node that defined the scope frame (e.g., a block or overlay)
-    pub node_id: NodeId,
+    pub node_id: NodeId<()>,
 }
 
 impl Frame {
-    pub fn new(scope_type: FrameType, node_id: NodeId) -> Self {
+    pub fn new(scope_type: FrameType, node_id: NodeId<()>) -> Self {
         Frame {
             frame_type: scope_type,
             variables: HashMap::new(),
@@ -56,9 +56,9 @@ pub struct NameBindings {
     pub scope: Vec<Frame>,
     pub scope_stack: Vec<ScopeId>,
     pub variables: Vec<Variable>,
-    pub var_resolution: HashMap<NodeId, VarId>,
+    pub var_resolution: HashMap<NodeId<()>, VarId>,
     pub decls: Vec<Box<dyn Command>>,
-    pub decl_resolution: HashMap<NodeId, DeclId>,
+    pub decl_resolution: HashMap<NodeId<()>, DeclId>,
     pub errors: Vec<SourceError>,
 }
 
@@ -84,7 +84,7 @@ impl Default for NameBindings {
 
 pub struct Resolver<'a> {
     // Immutable reference to a compiler after the first parsing pass
-    compiler: &'a Compiler<'a>,
+    compiler: &'a Compiler,
 
     /// All scope frames ever entered, indexed by ScopeId
     pub scope: Vec<Frame>,
@@ -93,11 +93,11 @@ pub struct Resolver<'a> {
     /// Variables, indexed by VarId
     pub variables: Vec<Variable>,
     /// Mapping of variable's name node -> Variable
-    pub var_resolution: HashMap<NodeId, VarId>,
+    pub var_resolution: HashMap<NodeId<()>, VarId>,
     /// Declarations (commands, aliases, etc.), indexed by DeclId
     pub decls: Vec<Box<dyn Command>>,
     /// Mapping of decl's name node -> Command
-    pub decl_resolution: HashMap<NodeId, DeclId>,
+    pub decl_resolution: HashMap<NodeId<()>, DeclId>,
     /// Errors encountered during name binding
     pub errors: Vec<SourceError>,
 }
@@ -197,7 +197,7 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    pub fn resolve_expr(&mut self, expr: ExprHandle<'a>) {
+    pub fn resolve_expr(&mut self, expr: ExprHandle) {
         let node_id = expr.id;
         match expr.node {
             Expr::VarRef => self.resolve_variable(expr.id),
@@ -278,7 +278,7 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    pub fn resolve_stmt(&mut self, stmt: StmtHandle<'a>) {
+    pub fn resolve_stmt(&mut self, stmt: StmtHandle) {
         match stmt.node {
             Stmt::Def(Def {
                 name,
@@ -363,7 +363,7 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    pub fn resolve_call(&mut self, unbound_node_id: NodeId, parts: &[ExprHandle<'a>]) {
+    pub fn resolve_call(&mut self, unbound_node_id: NodeId<()>, parts: &[ExprHandle]) {
         // Find out the potentially longest command name
         let max_name_parts = parts
             .iter()
@@ -429,7 +429,7 @@ impl<'a> Resolver<'a> {
     }
 
     /// Enter a new scope frame, e.g., a block or a closure
-    pub fn enter_scope(&mut self, node_id: NodeId) {
+    pub fn enter_scope(&mut self, node_id: NodeId<()>) {
         self.scope.push(Frame::new(FrameType::Scope, node_id));
         self.scope_stack.push(ScopeId(self.scope.len() - 1));
     }
@@ -453,7 +453,7 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    pub fn define_variable(&mut self, var_name_id: NodeId, is_mutable: bool) {
+    pub fn define_variable(&mut self, var_name_id: NodeId<()>, is_mutable: bool) {
         let var_name = self.compiler.get_span_contents(var_name_id);
         let var_name = trim_var_name(var_name).to_vec();
 
@@ -474,7 +474,7 @@ impl<'a> Resolver<'a> {
         self.var_resolution.insert(var_name_id, var_id);
     }
 
-    pub fn define_decl(&mut self, decl_name_id: NodeId) {
+    pub fn define_decl(&mut self, decl_name_id: NodeId<()>) {
         // TODO: Deduplicate code with define_variable()
         let decl_name = self.compiler.get_span_contents(decl_name_id);
         let decl_name = trim_decl_name(decl_name).to_vec();

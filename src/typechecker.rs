@@ -74,7 +74,7 @@ pub const ERROR_TYPE: TypeId = TypeId(14);
 
 pub struct Typechecker<'a> {
     /// Immutable reference to a compiler after the name binding pass
-    compiler: &'a Compiler<'a>,
+    compiler: &'a Compiler,
 
     /// Types referenced by TypeId
     types: Vec<Type>,
@@ -91,7 +91,7 @@ pub struct Typechecker<'a> {
     pub errors: Vec<SourceError>,
 }
 
-impl<'a> Typechecker<'a> {
+impl Typechecker {
     pub fn new(compiler: &'a Compiler) -> Self {
         Self {
             compiler,
@@ -197,7 +197,7 @@ impl<'a> Typechecker<'a> {
             .map_or(NONE_TYPE, |handle| self.type_id_of(handle.id))
     }
 
-    fn typecheck_stmt(&mut self, stmt: StmtHandle<'a>) {
+    fn typecheck_stmt(&mut self, stmt: StmtHandle) {
         let node_id = stmt.id;
         self.set_node_type_id(node_id, NONE_TYPE);
         match stmt.node {
@@ -286,7 +286,7 @@ impl<'a> Typechecker<'a> {
         }
     }
 
-    fn typecheck_expr(&mut self, expr: ExprHandle<'a>) -> TypeId {
+    fn typecheck_expr(&mut self, expr: ExprHandle) -> TypeId {
         let node_id = expr.id;
         match expr.node {
             Expr::Null => self.set_node_type_id(node_id, NOTHING_TYPE),
@@ -435,8 +435,8 @@ impl<'a> Typechecker<'a> {
 
     fn typecheck_match(
         &mut self,
-        target: ExprHandle<'a>,
-        match_arms: &Vec<(ExprHandle<'a>, ExprHandle<'a>)>,
+        target: ExprHandle,
+        match_arms: &Vec<(ExprHandle, ExprHandle)>,
     ) -> HashSet<TypeId> {
         self.typecheck_expr(target.clone());
 
@@ -495,9 +495,9 @@ impl<'a> Typechecker<'a> {
 
     fn typecheck_binary_op(
         &mut self,
-        lhs: ExprHandle<'a>,
-        op: Handle<'a, BinOp>,
-        rhs: ExprHandle<'a>,
+        lhs: ExprHandle,
+        op: NodeId<BinOp>,
+        rhs: ExprHandle,
         node_id: NodeId,
     ) -> TypeId {
         let lhs_type = self.typecheck_expr(lhs.clone());
@@ -620,7 +620,7 @@ impl<'a> Typechecker<'a> {
         }
     }
 
-    fn typecheck_param(&mut self, param: Handle<'a, Param>) -> TypeId {
+    fn typecheck_param(&mut self, param: NodeId<Param>) -> TypeId {
         if let Some(ty) = &param.node.ty {
             let var_id = self
                 .compiler
@@ -635,7 +635,7 @@ impl<'a> Typechecker<'a> {
         }
     }
 
-    fn typecheck_def(&mut self, def: Def<'a>, node_id: NodeId) {
+    fn typecheck_def(&mut self, def: Def, node_id: NodeId) {
         let return_ty = def
             .return_ty
             .map(|ty| {
@@ -698,7 +698,7 @@ impl<'a> Typechecker<'a> {
         );
     }
 
-    fn typecheck_call(&mut self, parts: &[ExprHandle<'a>], node_id: NodeId) -> TypeId {
+    fn typecheck_call(&mut self, parts: &[ExprHandle], node_id: NodeId) -> TypeId {
         let num_name_parts = if let Some(decl_id) = self.compiler.decl_resolution.get(&node_id) {
             // TODO: The type should be `oneof<all_possible_output_types>`
             self.set_node_type_id(node_id, ANY_TYPE);
@@ -724,8 +724,8 @@ impl<'a> Typechecker<'a> {
     fn typecheck_let(
         &mut self,
         variable_name: NodeId,
-        ty: Option<TypeHandle<'a>>,
-        initializer: ExprHandle<'a>,
+        ty: Option<TypeHandle>,
+        initializer: ExprHandle,
         node_id: NodeId,
     ) {
         let init_id = initializer.id;
@@ -756,7 +756,7 @@ impl<'a> Typechecker<'a> {
         self.set_node_type_id(node_id, NONE_TYPE);
     }
 
-    fn typecheck_type(&mut self, ty: TypeHandle<'a>) -> TypeId {
+    fn typecheck_type(&mut self, ty: TypeHandle) -> TypeId {
         let name = self.compiler.get_span_contents(ty.node.name);
 
         // taken from parse_shape_name() in Nushell:

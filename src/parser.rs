@@ -1,33 +1,31 @@
+use std::any::Any;
 use std::fmt::{Display, Write};
 
-use crate::compiler::{Compiler, RollbackPoint, Span};
+use crate::compiler::{Compiler, Node, NodeId, RollbackPoint, Span};
 use crate::errors::{Severity, SourceError};
 use crate::lexer::{Token, Tokens};
 
 use tracy_client::span;
 
-pub struct Parser<'a> {
-    pub compiler: Compiler<'a>,
+pub struct Parser {
+    pub compiler: Compiler,
     tokens: Tokens,
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct NodeId(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockId(pub usize);
 
 impl Node for BlockId {}
 
-pub type BlockHandle<'a> = Handle<'a, BlockId>;
+pub type BlockHandle = NodeId<BlockId>;
 
 #[derive(Debug, Clone)]
-pub struct Block<'a> {
-    pub nodes: Vec<StmtHandle<'a>>,
+pub struct Block {
+    pub nodes: Vec<StmtHandle>,
 }
 
-impl<'a> Block<'a> {
-    pub fn new(nodes: Vec<StmtHandle<'a>>) -> Block<'a> {
+impl Block {
+    pub fn new(nodes: Vec<StmtHandle>) -> Block {
         Block { nodes }
     }
 }
@@ -58,28 +56,10 @@ pub enum BarewordContext {
     Call,
 }
 
-#[derive(PartialEq, Clone, Copy)]
-pub struct Handle<'a, T> {
-    pub id: NodeId,
-    pub node: &'a T,
-}
-
-impl<'a, T> std::fmt::Debug for Handle<'a, T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&format!("Handle({})", self.id.0))
-    }
-}
-
-pub trait Node: std::fmt::Debug {
-    fn bareword_like(&self) -> bool {
-        false
-    }
-}
-
-pub type ExprHandle<'a> = Handle<'a, Expr<'a>>;
+pub type ExprHandle = NodeId<Expr>;
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum Expr<'a> {
+pub enum Expr {
     Int,
     Float,
     String {
@@ -95,53 +75,53 @@ pub enum Expr<'a> {
     Null,
 
     Closure {
-        params: Option<Handle<'a, Params<'a>>>,
-        block: BlockHandle<'a>,
+        params: Option<NodeId<Params>>,
+        block: BlockHandle,
     },
 
     Call {
-        parts: Vec<ExprHandle<'a>>,
+        parts: Vec<ExprHandle>,
     },
     NamedValue {
-        name: NodeId,
-        value: ExprHandle<'a>,
+        name: NodeId<()>,
+        value: ExprHandle,
     },
     BinaryOp {
-        lhs: ExprHandle<'a>,
-        op: Handle<'a, BinOp>,
-        rhs: ExprHandle<'a>,
+        lhs: ExprHandle,
+        op: NodeId<BinOp>,
+        rhs: ExprHandle,
     },
     Range {
-        lhs: ExprHandle<'a>,
-        rhs: ExprHandle<'a>,
+        lhs: ExprHandle,
+        rhs: ExprHandle,
     },
-    List(Vec<ExprHandle<'a>>),
+    List(Vec<ExprHandle>),
     Table {
-        header: ExprHandle<'a>,
-        rows: Vec<ExprHandle<'a>>,
+        header: ExprHandle,
+        rows: Vec<ExprHandle>,
     },
     Record {
-        pairs: Vec<(ExprHandle<'a>, ExprHandle<'a>)>,
+        pairs: Vec<(ExprHandle, ExprHandle)>,
     },
     MemberAccess {
-        target: ExprHandle<'a>,
-        field: NodeId,
+        target: ExprHandle,
+        field: NodeId<()>,
     },
     Block(BlockId),
     If {
-        condition: ExprHandle<'a>,
-        then_block: BlockHandle<'a>,
-        else_block: Option<ExprHandle<'a>>,
+        condition: ExprHandle,
+        then_block: BlockHandle,
+        else_block: Option<ExprHandle>,
     },
     Match {
-        target: ExprHandle<'a>,
-        match_arms: Vec<(ExprHandle<'a>, ExprHandle<'a>)>,
+        target: ExprHandle,
+        match_arms: Vec<(ExprHandle, ExprHandle)>,
     },
 
     Garbage,
 }
 
-impl<'a> Node for Expr<'a> {
+impl Node for Expr {
     fn bareword_like(&self) -> bool {
         match self {
             Expr::Int | Expr::Float | Expr::VarRef | Expr::String { .. } => true,
@@ -151,81 +131,105 @@ impl<'a> Node for Expr<'a> {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Def<'a> {
-    pub name: NodeId,
-    pub params: Handle<'a, Params<'a>>,
-    pub return_ty: Option<Handle<'a, InOutTypes<'a>>>,
-    pub block: BlockHandle<'a>,
+pub struct Def {
+    pub name: NodeId<()>,
+    pub params: NodeId<Params>,
+    pub return_ty: Option<NodeId<InOutTypes>>,
+    pub block: BlockHandle,
 }
 
-pub type StmtHandle<'a> = Handle<'a, Stmt<'a>>;
+pub type StmtHandle = NodeId<Stmt>;
 
 #[derive(Debug, PartialEq, Clone)]
-pub enum Stmt<'a> {
+pub enum Stmt {
     Let {
-        variable_name: NodeId,
-        ty: Option<TypeHandle<'a>>,
-        initializer: ExprHandle<'a>,
+        variable_name: NodeId<()>,
+        ty: Option<TypeHandle>,
+        initializer: ExprHandle,
         is_mutable: bool,
     },
     While {
-        condition: ExprHandle<'a>,
-        block: BlockHandle<'a>,
+        condition: ExprHandle,
+        block: BlockHandle,
     },
     For {
-        variable: NodeId,
-        range: ExprHandle<'a>,
-        block: BlockHandle<'a>,
+        variable: NodeId<()>,
+        range: ExprHandle,
+        block: BlockHandle,
     },
     Loop {
-        block: BlockHandle<'a>,
+        block: BlockHandle,
     },
-    Return(Option<ExprHandle<'a>>),
+    Return(Option<ExprHandle>),
     Break,
     Continue,
-    Expr(ExprHandle<'a>),
-    Def(Def<'a>),
+    Expr(ExprHandle),
+    Def(Def),
     Alias {
-        new_name: NodeId,
-        old_name: NodeId,
+        new_name: NodeId<()>,
+        old_name: NodeId<()>,
     },
 
     Garbage,
 }
-impl<'a> Node for Stmt<'a> {}
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct Params<'a>(pub Vec<Handle<'a, Param<'a>>>);
-impl<'a> Node for Params<'a> {}
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct Param<'a> {
-    pub name: NodeId,
-    pub ty: Option<TypeHandle<'a>>,
+impl Node for Stmt {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
-impl<'a> Node for Param<'a> {}
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct InOutTypes<'a>(pub Vec<Handle<'a, InOutType<'a>>>);
-impl<'a> Node for InOutTypes<'a> {}
+pub struct Params(pub Vec<NodeId<Param>>);
+impl Node for Params {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct Param {
+    pub name: NodeId,
+    pub ty: Option<TypeHandle>,
+}
+impl Node for Param {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct InOutTypes(pub Vec<NodeId<InOutType>>);
+impl Node for InOutTypes {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 /// Input/output type pair for a command
 #[derive(Debug, PartialEq, Clone)]
-pub struct InOutType<'a>(pub TypeHandle<'a>, pub TypeHandle<'a>);
-impl<'a> Node for InOutType<'a> {}
+pub struct InOutType(pub TypeHandle, pub TypeHandle);
+impl Node for InOutType {}
 
-pub type TypeHandle<'a> = Handle<'a, Type<'a>>;
+pub type TypeHandle = NodeId<Type>;
 #[derive(Debug, PartialEq, Clone)]
-pub struct Type<'a> {
+pub struct Type {
     pub name: NodeId,
-    pub params: Option<Handle<'a, TypeArgs<'a>>>,
+    pub params: Option<NodeId<TypeArgs>>,
     pub optional: bool,
 }
-impl<'a> Node for Type<'a> {}
+impl Node for Type {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct TypeArgs<'a>(pub Vec<TypeHandle<'a>>);
-impl<'a> Node for TypeArgs<'a> {}
+pub struct TypeArgs(pub Vec<TypeHandle>);
+impl Node for TypeArgs {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum BinOp {
@@ -262,7 +266,11 @@ pub enum BinOp {
 
     Unknown,
 }
-impl Node for BinOp {}
+impl Node for BinOp {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 // TODO: All nodes with Vec<...> should be moved to their own ID (like BlockId) to allow Copy trait
 #[derive(Debug, PartialEq, Clone)]
@@ -286,6 +294,10 @@ impl Node for AstNode {
             AstNode::Name | AstNode::VarDecl => true,
             _ => false,
         }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -321,8 +333,8 @@ impl BinOp {
     }
 }
 
-impl<'a> Parser<'a> {
-    pub fn new(compiler: Compiler<'a>, tokens: Tokens) -> Self {
+impl Parser {
+    pub fn new(compiler: Compiler, tokens: Tokens) -> Self {
         Self { compiler, tokens }
     }
 
@@ -334,7 +346,7 @@ impl<'a> Parser<'a> {
         self.compiler.spans[node_id.0].end
     }
 
-    pub fn parse(mut self) -> Compiler<'a> {
+    pub fn parse(mut self) -> Compiler {
         let _span = span!();
         let entry = self.block(BlockContext::Bare);
         self.compiler.entry_points.push(entry);
@@ -342,19 +354,19 @@ impl<'a> Parser<'a> {
         self.compiler
     }
 
-    pub fn expression_or_assignment(&mut self) -> ExprHandle<'a> {
+    pub fn expression_or_assignment(&mut self) -> ExprHandle {
         let _span = span!();
         self.math_expression(true)
     }
 
-    pub fn expression(&mut self) -> ExprHandle<'a> {
+    pub fn expression(&mut self) -> ExprHandle {
         let _span = span!();
         self.math_expression(false)
     }
 
-    pub fn math_expression(&mut self, allow_assignment: bool) -> ExprHandle<'a> {
+    pub fn math_expression(&mut self, allow_assignment: bool) -> ExprHandle {
         let _span = span!();
-        let mut expr_stack = Vec::<(Handle<'a, BinOp>, ExprHandle)>::new();
+        let mut expr_stack = Vec::<(NodeId<BinOp>, ExprHandle)>::new();
 
         let mut last_prec = 1000000;
 
@@ -487,7 +499,7 @@ impl<'a> Parser<'a> {
         leftmost
     }
 
-    pub fn simple_expression(&mut self, bareword_context: BarewordContext) -> ExprHandle<'a> {
+    pub fn simple_expression(&mut self, bareword_context: BarewordContext) -> ExprHandle {
         let _span = span!();
 
         // skip comments and newlines
@@ -580,12 +592,12 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn advance_node<T: Node + 'a>(&mut self, node: T, span: Span) -> Handle<'a, T> {
+    pub fn advance_node<T: Node>(&mut self, node: T, span: Span) -> NodeId<T> {
         self.tokens.advance();
         self.create_node(node, span.start, span.end)
     }
 
-    pub fn variable(&mut self) -> ExprHandle<'a> {
+    pub fn variable(&mut self) -> ExprHandle {
         if self.is_dollar() {
             let span_start = self.position();
             self.tokens.advance();
@@ -601,7 +613,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn variable_decl(&mut self) -> NodeId {
+    pub fn variable_decl(&mut self) -> NodeId<()> {
         let _span = span!();
 
         let span_start = self.position();
@@ -619,7 +631,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn call(&mut self) -> ExprHandle<'a> {
+    pub fn call(&mut self) -> ExprHandle {
         let _span = span!();
         let mut parts = vec![self.call_name()];
         let mut is_head = true;
@@ -647,7 +659,7 @@ impl<'a> Parser<'a> {
         self.create_node(Expr::Call { parts }, span_start, span_end)
     }
 
-    pub fn list_or_table(&mut self) -> ExprHandle<'a> {
+    pub fn list_or_table(&mut self) -> ExprHandle {
         let _span = span!();
         let span_start = self.position();
         let mut is_table = false;
@@ -698,7 +710,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn record_or_closure(&mut self) -> ExprHandle<'a> {
+    pub fn record_or_closure(&mut self) -> ExprHandle {
         let _span = span!();
         let span_start = self.position();
         let mut span_end = self.position(); // TODO: make sure we only initialize it expectedly
@@ -777,7 +789,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn operator(&mut self) -> Handle<'a, BinOp> {
+    pub fn operator(&mut self) -> NodeId<BinOp> {
         let (token, span) = self.tokens.peek();
 
         match token {
@@ -836,7 +848,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn bareword_string(&mut self) -> ExprHandle<'a> {
+    pub fn bareword_string(&mut self) -> ExprHandle {
         match self.tokens.peek() {
             (Token::Bareword, span) => self.advance_node(Expr::String { bareword: true }, span),
             _ => self.my_error("expected: name", Expr::Garbage),
@@ -850,7 +862,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn call_name(&mut self) -> ExprHandle<'a> {
+    pub fn call_name(&mut self) -> ExprHandle {
         let (mut token, mut span) = self.tokens.peek();
 
         loop {
@@ -877,7 +889,7 @@ impl<'a> Parser<'a> {
         self.tokens.peek_token() != Token::Eof
     }
 
-    pub fn match_expression(&mut self) -> ExprHandle<'a> {
+    pub fn match_expression(&mut self) -> ExprHandle {
         let _span = span!();
         let span_start = self.position();
         let span_end;
@@ -926,7 +938,7 @@ impl<'a> Parser<'a> {
         self.create_node(Expr::Match { target, match_arms }, span_start, span_end)
     }
 
-    pub fn if_expression(&mut self) -> ExprHandle<'a> {
+    pub fn if_expression(&mut self) -> ExprHandle {
         let _span = span!();
         let span_start = self.position();
         let span_end;
@@ -972,7 +984,7 @@ impl<'a> Parser<'a> {
 
     // directly ripped from `type_params` just changed delimiters
     // FIXME: simplify if appropriate
-    pub fn signature_params(&mut self, params_context: ParamsContext) -> Handle<'a, Params<'a>> {
+    pub fn signature_params(&mut self, params_context: ParamsContext) -> NodeId<Params> {
         let _span = span!();
         let span_start = self.position();
         let span_end;
@@ -1040,7 +1052,7 @@ impl<'a> Parser<'a> {
         self.create_node(Params(param_list), span_start, span_end)
     }
 
-    pub fn type_params(&mut self) -> Handle<'a, TypeArgs<'a>> {
+    pub fn type_params(&mut self) -> NodeId<TypeArgs> {
         let _span = span!();
         let span_start = self.position();
         let span_end;
@@ -1071,7 +1083,7 @@ impl<'a> Parser<'a> {
         self.create_node(TypeArgs(param_list), span_start, span_end)
     }
 
-    pub fn typename(&mut self) -> TypeHandle<'a> {
+    pub fn typename(&mut self) -> TypeHandle {
         let _span = span!();
         if let (Token::Bareword, span) = self.tokens.peek() {
             let name = self.name();
@@ -1113,7 +1125,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn in_out_type(&mut self) -> Handle<'a, InOutType<'a>> {
+    pub fn in_out_type(&mut self) -> NodeId<InOutType> {
         let _span = span!();
         let span_start = self.position();
 
@@ -1125,7 +1137,7 @@ impl<'a> Parser<'a> {
         self.create_node(InOutType(in_ty, out_ty), span_start, span_end)
     }
 
-    pub fn in_out_types(&mut self) -> Handle<'a, InOutTypes<'a>> {
+    pub fn in_out_types(&mut self) -> NodeId<InOutTypes> {
         let _span = span!();
         self.colon();
 
@@ -1159,7 +1171,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn def_statement(&mut self) -> StmtHandle<'a> {
+    pub fn def_statement(&mut self) -> StmtHandle {
         let _span = span!();
         let span_start = self.position();
 
@@ -1196,7 +1208,7 @@ impl<'a> Parser<'a> {
     }
 
     // TODO: Deduplicate code between let/mut/const assignments
-    pub fn let_statement(&mut self) -> StmtHandle<'a> {
+    pub fn let_statement(&mut self) -> StmtHandle {
         let _span = span!();
         let is_mutable = false;
         let span_start = self.position();
@@ -1233,7 +1245,7 @@ impl<'a> Parser<'a> {
     }
 
     // TODO: Deduplicate code between let/mut/const assignments
-    pub fn mut_statement(&mut self) -> StmtHandle<'a> {
+    pub fn mut_statement(&mut self) -> StmtHandle {
         let _span = span!();
         let is_mutable = true;
         let span_start = self.position();
@@ -1281,7 +1293,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn block(&mut self, context: BlockContext) -> BlockHandle<'a> {
+    pub fn block(&mut self, context: BlockContext) -> BlockHandle {
         let _span = span!();
         let span_start = self.position();
 
@@ -1354,7 +1366,7 @@ impl<'a> Parser<'a> {
         )
     }
 
-    pub fn while_statement(&mut self) -> StmtHandle<'a> {
+    pub fn while_statement(&mut self) -> StmtHandle {
         let _span = span!();
         let span_start = self.position();
         self.keyword(b"while");
@@ -1372,7 +1384,7 @@ impl<'a> Parser<'a> {
         self.create_node(Stmt::While { condition, block }, span_start, span_end)
     }
 
-    pub fn for_statement(&mut self) -> StmtHandle<'a> {
+    pub fn for_statement(&mut self) -> StmtHandle {
         let _span = span!();
         let span_start = self.position();
         self.keyword(b"for");
@@ -1395,7 +1407,7 @@ impl<'a> Parser<'a> {
         )
     }
 
-    pub fn loop_statement(&mut self) -> StmtHandle<'a> {
+    pub fn loop_statement(&mut self) -> StmtHandle {
         let _span = span!();
         let span_start = self.position();
         self.keyword(b"loop");
@@ -1405,7 +1417,7 @@ impl<'a> Parser<'a> {
         self.create_node(Stmt::Loop { block }, span_start, span_end)
     }
 
-    pub fn return_statement(&mut self) -> StmtHandle<'a> {
+    pub fn return_statement(&mut self) -> StmtHandle {
         let _span = span!();
         let span_start = self.position();
         let span_end;
@@ -1424,7 +1436,7 @@ impl<'a> Parser<'a> {
         self.create_node(Stmt::Return(ret_val), span_start, span_end)
     }
 
-    pub fn continue_statement(&mut self) -> StmtHandle<'a> {
+    pub fn continue_statement(&mut self) -> StmtHandle {
         let _span = span!();
         let span_start = self.position();
         self.keyword(b"continue");
@@ -1433,7 +1445,7 @@ impl<'a> Parser<'a> {
         self.create_node(Stmt::Continue, span_start, span_end)
     }
 
-    pub fn break_statement(&mut self) -> StmtHandle<'a> {
+    pub fn break_statement(&mut self) -> StmtHandle {
         let _span = span!();
         let span_start = self.position();
         self.keyword(b"break");
@@ -1442,7 +1454,7 @@ impl<'a> Parser<'a> {
         self.create_node(Stmt::Break, span_start, span_end)
     }
 
-    pub fn alias_statement(&mut self) -> StmtHandle<'a> {
+    pub fn alias_statement(&mut self) -> StmtHandle {
         let _span = span!();
         let span_start = self.position();
         self.keyword(b"alias");
@@ -1648,24 +1660,24 @@ impl<'a> Parser<'a> {
         });
     }
 
-    pub fn my_error<T: Node + 'a>(&mut self, message: impl Into<String>, node: T) -> Handle<'a, T> {
+    pub fn my_error<T: Node>(&mut self, message: impl Into<String>, node: T) -> NodeId<T> {
         let (token, span) = self.tokens.peek();
 
         if token != Token::Eof {
             self.tokens.advance();
         }
 
-        let node = self.create_node(node, span.start, span.end);
+        let node_id = self.create_node(node, span.start, span.end);
         self.compiler.errors.push(SourceError {
             message: message.into(),
-            node_id: node.id,
+            node_id,
             severity: Severity::Error,
         });
 
-        node
+        node_id
     }
 
-    pub fn error(&mut self, message: impl Into<String>) -> NodeId {
+    pub fn error(&mut self, message: impl Into<String>) -> NodeId<AstNode> {
         let (token, span) = self.tokens.peek();
 
         if token != Token::Eof {
@@ -1687,7 +1699,7 @@ impl<'a> Parser<'a> {
         ast_node: T,
         span_start: usize,
         span_end: usize,
-    ) -> Handle<'a, T> {
+    ) -> NodeId<T> {
         self.compiler.push_node(
             ast_node,
             Span {
