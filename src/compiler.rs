@@ -1,7 +1,7 @@
 use bumpalo::Bump;
 
 use crate::errors::SourceError;
-use crate::parser::{AstNode, Block, BlockHandle, Handle, Node, NodeId};
+use crate::parser::{Block, BlockHandle, NodeId, WithId};
 use crate::protocol::Command;
 use crate::resolver::{DeclId, Frame, NameBindings, ScopeId, VarId, Variable};
 use crate::typechecker::{TypeId, Types};
@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 pub struct RollbackPoint {
     idx_span_start: usize,
-    idx_nodes: usize,
+    // idx_nodes: usize,
     idx_errors: usize,
     idx_blocks: usize,
     token_pos: usize,
@@ -39,8 +39,9 @@ impl<T> Spanned<T> {
     }
 }
 
-pub struct Compiler {
-    pub bump: Bump,
+pub struct Compiler<'a> {
+    pub bump: &'a Bump,
+    pub spans: Vec<Span>,
     /// The top-level expressions in each file
     pub entry_points: Vec<BlockHandle<'a>>,
     pub node_types: Vec<TypeId>,
@@ -75,10 +76,11 @@ pub struct Compiler {
     pub errors: Vec<SourceError>,
 }
 
-impl Compiler {
-    pub fn new() -> Self {
+impl<'a> Compiler<'a> {
+    pub fn new(bump: &'a Bump) -> Self {
         Self {
-            bump: Bump::new(),
+            bump,
+            spans: vec![],
             entry_points: vec![],
             node_types: vec![],
             blocks: vec![],
@@ -108,10 +110,16 @@ impl Compiler {
         print!("{output}");
     }
 
-    #[allow(clippy::format_collect)]
+    // #[allow(clippy::format_collect)]
     pub fn display_state(&self) -> String {
         // TODO: This should say PARSER, not COMPILER
         let mut result = "==== COMPILER ====\n".to_string();
+
+        for (idx, entry) in self.entry_points.iter().enumerate() {
+            let block_id = entry.item;
+            let block = &self.blocks[block_id.0];
+            result.push_str(&format!("{}: {:#?}", idx, block));
+        }
 
         // for (idx, ast_node) in self.nodes.iter().enumerate() {
         //     result.push_str(&format!(
@@ -171,14 +179,16 @@ impl Compiler {
     }
 
     // TODO This could be &mut T if necessary
-    pub fn push_node<'a, T>(&'a self, ast_node: T) -> &'a T {
-        self.bump.alloc(ast_node)
+    pub fn push_node<T>(&mut self, ast_node: T, span: Span) -> bumpalo::boxed::Box<'a, WithId<T>> {
+        let id = NodeId(self.spans.len());
+        self.spans.push(span);
+        bumpalo::boxed::Box::new_in(WithId { id, item: ast_node }, self.bump)
     }
 
     pub fn get_rollback_point(&self, token_pos: usize) -> RollbackPoint {
         RollbackPoint {
             idx_span_start: self.spans.len(),
-            idx_nodes: self.nodes.len(),
+            // idx_nodes: self.nodes.len(),
             idx_errors: self.errors.len(),
             idx_blocks: self.blocks.len(),
             token_pos,
@@ -187,7 +197,7 @@ impl Compiler {
 
     pub fn apply_compiler_rollback(&mut self, rbp: RollbackPoint) -> usize {
         self.blocks.truncate(rbp.idx_blocks);
-        self.nodes.truncate(rbp.idx_nodes);
+        // self.nodes.truncate(rbp.idx_nodes);
         self.errors.truncate(rbp.idx_errors);
         self.spans.truncate(rbp.idx_span_start);
 

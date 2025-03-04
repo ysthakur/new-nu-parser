@@ -1,7 +1,7 @@
 use crate::compiler::Compiler;
 use crate::errors::{Severity, SourceError};
 use crate::parser::{
-    BinOp, BlockId, Def, Expr, ExprHandle, Handle, NodeId, Param, Stmt, StmtHandle, TypeHandle,
+    BinOp, BlockId, Def, Expr, ExprHandle, NodeId, Param, Stmt, TypeHandle, WithId,
 };
 use std::cmp::Ordering;
 use std::collections::HashSet;
@@ -72,9 +72,9 @@ pub const LIST_ANY_TYPE: TypeId = TypeId(12);
 pub const BYTE_STREAM_TYPE: TypeId = TypeId(13);
 pub const ERROR_TYPE: TypeId = TypeId(14);
 
-pub struct Typechecker<'a> {
+pub struct Typechecker<'tc, 'a> {
     /// Immutable reference to a compiler after the name binding pass
-    compiler: &'a Compiler<'a>,
+    compiler: &'tc Compiler<'a>,
 
     /// Types referenced by TypeId
     types: Vec<Type>,
@@ -91,8 +91,8 @@ pub struct Typechecker<'a> {
     pub errors: Vec<SourceError>,
 }
 
-impl<'a> Typechecker<'a> {
-    pub fn new(compiler: &'a Compiler) -> Self {
+impl<'tc, 'a> Typechecker<'tc, 'a> {
+    pub fn new(compiler: &'tc Compiler<'a>) -> Self {
         Self {
             compiler,
             types: vec![
@@ -113,7 +113,7 @@ impl<'a> Typechecker<'a> {
                 Type::Stream(BINARY_TYPE),
                 Type::Error,
             ],
-            node_types: vec![UNKNOWN_TYPE; compiler.nodes.len()],
+            node_types: vec![UNKNOWN_TYPE; compiler.spans.len()],
             oneof_types: Vec::new(),
             variable_types: vec![UNKNOWN_TYPE; compiler.variables.len()],
             decl_types: vec![
@@ -169,7 +169,7 @@ impl<'a> Typechecker<'a> {
     /// Typecheck AST nodes, starting from the last node
     pub fn typecheck(&mut self) {
         for entry in &self.compiler.entry_points {
-            self.typecheck_block(*entry.node);
+            self.typecheck_block(entry.item);
         }
     }
 
@@ -187,7 +187,7 @@ impl<'a> Typechecker<'a> {
     fn typecheck_block(&mut self, block_id: BlockId) -> TypeId {
         let stmts = &self.compiler.blocks[block_id.0].nodes;
         for stmt in stmts {
-            self.typecheck_stmt(stmt.clone());
+            self.typecheck_stmt(&stmt);
         }
 
         // Block type is the type of the last statement, since blocks
@@ -197,11 +197,11 @@ impl<'a> Typechecker<'a> {
             .map_or(NONE_TYPE, |handle| self.type_id_of(handle.id))
     }
 
-    fn typecheck_stmt(&mut self, stmt: StmtHandle<'a>) {
+    fn typecheck_stmt(&mut self, stmt: &WithId<Stmt<'a>>) {
         let node_id = stmt.id;
         self.set_node_type_id(node_id, NONE_TYPE);
-        match stmt.node {
-            Stmt::Def(def) => self.typecheck_def(def.clone(), node_id),
+        match &stmt.item {
+            Stmt::Def(def) => self.typecheck_def(def, node_id),
             Stmt::Alias { new_name, old_name } => {
                 self.typecheck_alias(*new_name, *old_name, node_id)
             }
@@ -210,7 +210,7 @@ impl<'a> Typechecker<'a> {
                 ty,
                 initializer,
                 is_mutable: _,
-            } => self.typecheck_let(*variable_name, ty.clone(), initializer.clone(), node_id),
+            } => self.typecheck_let(*variable_name, ty, initializer, node_id),
             Stmt::For {
                 variable,
                 range,
@@ -234,7 +234,7 @@ impl<'a> Typechecker<'a> {
                     self.error("For loop range is not a list", range.id);
                 }
 
-                if self.typecheck_block(*block.node) != NONE_TYPE {
+                if self.typecheck_block(block.item) != NONE_TYPE {
                     self.error(
                         "Blocks in looping constructs cannot return values",
                         block.id,
@@ -246,7 +246,7 @@ impl<'a> Typechecker<'a> {
                 }
             }
             Stmt::While { condition, block } => {
-                let block_ty = self.typecheck_block(*block.node);
+                let block_ty = self.typecheck_block(block.item);
                 if block_ty != NONE_TYPE {
                     self.error(
                         "Blocks in looping constructs cannot return values",
@@ -266,7 +266,7 @@ impl<'a> Typechecker<'a> {
                 }
             }
             Stmt::Loop { block } => {
-                let block_ty = self.typecheck_block(*block.node);
+                let block_ty = self.typecheck_block(block.item);
                 if block_ty != NONE_TYPE {
                     self.error(
                         "Blocks in looping constructs cannot return values",
@@ -286,9 +286,9 @@ impl<'a> Typechecker<'a> {
         }
     }
 
-    fn typecheck_expr(&mut self, expr: ExprHandle<'a>) -> TypeId {
+    fn typecheck_expr(&mut self, expr: &WithId<Expr<'a>>) -> TypeId {
         let node_id = expr.id;
-        match expr.node {
+        match &expr.item {
             Expr::Null => self.set_node_type_id(node_id, NOTHING_TYPE),
             Expr::Int => self.set_node_type_id(node_id, INT_TYPE),
             Expr::Float => self.set_node_type_id(node_id, FLOAT_TYPE),
@@ -345,17 +345,15 @@ impl<'a> Typechecker<'a> {
             Expr::Closure { params, block } => {
                 // TODO: input/output types
                 if let Some(params) = params {
-                    for param in &params.node.0 {
+                    for param in &params.item.0 {
                         self.typecheck_param(param.clone());
                     }
                 }
 
-                self.typecheck_block(*block.node);
+                self.typecheck_block(block.item);
                 self.set_node_type_id(node_id, CLOSURE_TYPE)
             }
-            Expr::BinaryOp { lhs, op, rhs } => {
-                self.typecheck_binary_op(lhs.clone(), op.clone(), rhs.clone(), node_id)
-            }
+            Expr::BinaryOp { lhs, op, rhs } => self.typecheck_binary_op(&lhs, &op, &rhs, node_id),
             Expr::VarRef => {
                 let var_id = self
                     .compiler
@@ -370,13 +368,13 @@ impl<'a> Typechecker<'a> {
                 then_block,
                 else_block,
             } => {
-                let cond_ty = self.typecheck_expr(condition.clone());
+                let cond_ty = self.typecheck_expr(&condition);
 
-                let then_type_id = self.typecheck_block(*then_block.node);
+                let then_type_id = self.typecheck_block(then_block.item);
                 let mut else_type = None;
 
-                if let Some(else_blk) = else_block {
-                    let ty_id = self.typecheck_expr(else_blk.clone());
+                if let Some(else_blk) = &else_block {
+                    let ty_id = self.typecheck_expr(else_blk);
                     else_type = Some(self.types[ty_id.0]);
                 }
 
@@ -435,7 +433,7 @@ impl<'a> Typechecker<'a> {
 
     fn typecheck_match(
         &mut self,
-        target: ExprHandle<'a>,
+        target: &WithId<Expr<'a>>,
         match_arms: &Vec<(ExprHandle<'a>, ExprHandle<'a>)>,
     ) -> HashSet<TypeId> {
         self.typecheck_expr(target.clone());
@@ -495,9 +493,9 @@ impl<'a> Typechecker<'a> {
 
     fn typecheck_binary_op(
         &mut self,
-        lhs: ExprHandle<'a>,
-        op: Handle<'a, BinOp>,
-        rhs: ExprHandle<'a>,
+        lhs: &WithId<Expr<'a>>,
+        op: &WithId<BinOp>,
+        rhs: &WithId<Expr<'a>>,
         node_id: NodeId,
     ) -> TypeId {
         let lhs_type = self.typecheck_expr(lhs.clone());
@@ -505,7 +503,7 @@ impl<'a> Typechecker<'a> {
         let rhs_type = self.typecheck_expr(rhs.clone());
         let rhs_type = self.types[rhs_type.0];
 
-        let out_type = match op.node {
+        let out_type = match op.item {
             BinOp::Equal | BinOp::NotEqual => Some(Type::Bool),
             BinOp::LessThan
             | BinOp::GreaterThan
@@ -620,14 +618,14 @@ impl<'a> Typechecker<'a> {
         }
     }
 
-    fn typecheck_param(&mut self, param: Handle<'a, Param>) -> TypeId {
-        if let Some(ty) = &param.node.ty {
+    fn typecheck_param(&mut self, param: &WithId<Param<'a>>) -> TypeId {
+        if let Some(ty) = &param.item.ty {
             let var_id = self
                 .compiler
                 .var_resolution
-                .get(&param.node.name)
+                .get(&param.item.name)
                 .expect("missing resolved variable");
-            let ty = self.typecheck_type(ty.clone());
+            let ty = self.typecheck_type(ty);
             self.variable_types[var_id.0] = ty;
             self.set_node_type_id(param.id, ty)
         } else {
@@ -635,28 +633,29 @@ impl<'a> Typechecker<'a> {
         }
     }
 
-    fn typecheck_def(&mut self, def: Def<'a>, node_id: NodeId) {
+    fn typecheck_def(&mut self, def: &Def<'a>, node_id: NodeId) {
         let return_ty = def
             .return_ty
+            .as_ref()
             .map(|ty| {
-                ty.node
+                ty.item
                     .0
                     .iter()
                     .map(|ty| {
-                        let crate::parser::InOutType(in_ty, out_ty) = ty.node;
+                        let crate::parser::InOutType(in_ty, out_ty) = &ty.item;
                         InOutType {
-                            in_type: self.typecheck_type(in_ty.clone()),
-                            out_type: self.typecheck_type(out_ty.clone()),
+                            in_type: self.typecheck_type(&in_ty),
+                            out_type: self.typecheck_type(&out_ty),
                         }
                     })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
 
-        for param in &def.params.node.0 {
+        for param in &def.params.item.0 {
             self.typecheck_param(param.clone());
         }
-        let block_ty = self.typecheck_block(*def.block.node);
+        let block_ty = self.typecheck_block(def.block.item);
         self.set_node_type_id(node_id, NONE_TYPE);
 
         // set input/output types for the command
@@ -711,7 +710,7 @@ impl<'a> Typechecker<'a> {
         };
 
         for part in &parts[num_name_parts..] {
-            if matches!(part.node, Expr::String { bareword: true }) {
+            if matches!(part.item, Expr::String { bareword: true }) {
                 self.set_node_type_id(part.id, STRING_TYPE);
             } else {
                 self.typecheck_expr(part.clone());
@@ -724,8 +723,8 @@ impl<'a> Typechecker<'a> {
     fn typecheck_let(
         &mut self,
         variable_name: NodeId,
-        ty: Option<TypeHandle<'a>>,
-        initializer: ExprHandle<'a>,
+        ty: &Option<TypeHandle<'a>>,
+        initializer: &WithId<Expr<'a>>,
         node_id: NodeId,
     ) {
         let init_id = initializer.id;
@@ -756,8 +755,8 @@ impl<'a> Typechecker<'a> {
         self.set_node_type_id(node_id, NONE_TYPE);
     }
 
-    fn typecheck_type(&mut self, ty: TypeHandle<'a>) -> TypeId {
-        let name = self.compiler.get_span_contents(ty.node.name);
+    fn typecheck_type(&mut self, ty: &WithId<crate::parser::Type<'a>>) -> TypeId {
+        let name = self.compiler.get_span_contents(ty.item.name);
 
         // taken from parse_shape_name() in Nushell:
         match name {
@@ -765,9 +764,9 @@ impl<'a> Typechecker<'a> {
             // b"binary" => SyntaxShape::Binary,
             // b"block" => // not possible to pass blocks
             b"list" => {
-                if let Some(args_handle) = &ty.node.params {
+                if let Some(args_handle) = &ty.item.params {
                     let arg_ids = args_handle
-                        .node
+                        .item
                         .0
                         .iter()
                         .map(|arg| self.typecheck_type(arg.clone()))

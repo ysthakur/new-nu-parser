@@ -1,3 +1,5 @@
+use bumpalo::Bump;
+
 use crate::ir_generator::IrGenerator;
 use crate::lexer::lex;
 use crate::resolver::Resolver;
@@ -7,7 +9,8 @@ use crate::{compiler::Compiler, parser::Parser};
 use std::path::Path;
 
 fn evaluate_example(fname: &Path) -> String {
-    let mut compiler = Compiler::new();
+    let bump = Bump::new();
+    let mut compiler = Compiler::new(&bump);
     let contents = std::fs::read(fname).expect("We only run tests found by glob");
 
     let span_offset = compiler.span_offset();
@@ -20,8 +23,8 @@ fn evaluate_example(fname: &Path) -> String {
         std::process::exit(1);
     }
 
-    let parser = Parser::new(compiler, tokens);
-    compiler = parser.parse();
+    let parser = Parser::new(&mut compiler, tokens);
+    parser.parse();
 
     let mut result = compiler.display_state();
 

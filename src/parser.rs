@@ -2,15 +2,29 @@ use crate::compiler::{Compiler, RollbackPoint, Span};
 use crate::errors::{Severity, SourceError};
 use crate::lexer::{Token, Tokens};
 
+use std::fmt::Formatter;
+
 use tracy_client::span;
 
-pub struct Parser<'a> {
-    pub compiler: &'a mut Compiler,
+pub struct Parser<'parser, 'a> {
+    pub compiler: &'parser mut Compiler<'a>,
     tokens: Tokens,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(pub usize);
+
+impl std::fmt::Debug for NodeId {
+    fn fmt(&self, f: &mut Formatter) -> Result<(), std::fmt::Error> {
+        f.write_str(&format!("NodeId {}", self.0))
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct WithId<T> {
+    pub id: NodeId,
+    pub item: T,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockId(pub usize);
@@ -19,7 +33,7 @@ impl Node for BlockId {}
 
 pub type BlockHandle<'a> = Handle<'a, BlockId>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Block<'a> {
     pub nodes: Vec<StmtHandle<'a>>,
 }
@@ -56,7 +70,7 @@ pub enum BarewordContext {
     Call,
 }
 
-pub type Handle<'a, T> = &'a Spanned<T>;
+pub type Handle<'a, T> = bumpalo::boxed::Box<'a, WithId<T>>;
 
 pub trait Node: std::fmt::Debug {
     fn bareword_like(&self) -> bool {
@@ -66,13 +80,7 @@ pub trait Node: std::fmt::Debug {
 
 pub type ExprHandle<'a> = Handle<'a, Expr<'a>>;
 
-#[derive(Debug, PartialEq, Clone)]
-pub struct Spanned<T> {
-    pub span: Span,
-    pub val: T,
-}
-
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq)]
 pub enum Expr<'a> {
     Int,
     Float,
@@ -119,7 +127,7 @@ pub enum Expr<'a> {
     },
     MemberAccess {
         target: ExprHandle<'a>,
-        field: Span,
+        field: NodeId,
     },
     Block(BlockId),
     If {
@@ -144,9 +152,9 @@ impl<'a> Node for Expr<'a> {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq)]
 pub struct Def<'a> {
-    pub name: Span,
+    pub name: NodeId,
     pub params: Handle<'a, Params<'a>>,
     pub return_ty: Option<Handle<'a, InOutTypes<'a>>>,
     pub block: BlockHandle<'a>,
@@ -154,10 +162,10 @@ pub struct Def<'a> {
 
 pub type StmtHandle<'a> = Handle<'a, Stmt<'a>>;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq)]
 pub enum Stmt<'a> {
     Let {
-        variable_name: Span,
+        variable_name: NodeId,
         ty: Option<TypeHandle<'a>>,
         initializer: ExprHandle<'a>,
         is_mutable: bool,
@@ -167,7 +175,7 @@ pub enum Stmt<'a> {
         block: BlockHandle<'a>,
     },
     For {
-        variable: Span,
+        variable: NodeId,
         range: ExprHandle<'a>,
         block: BlockHandle<'a>,
     },
@@ -180,44 +188,44 @@ pub enum Stmt<'a> {
     Expr(ExprHandle<'a>),
     Def(Def<'a>),
     Alias {
-        new_name: Span,
-        old_name: Span,
+        new_name: NodeId,
+        old_name: NodeId,
     },
 
     Garbage,
 }
 impl<'a> Node for Stmt<'a> {}
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq)]
 pub struct Params<'a>(pub Vec<Handle<'a, Param<'a>>>);
 impl<'a> Node for Params<'a> {}
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq)]
 pub struct Param<'a> {
-    pub name: Span,
+    pub name: NodeId,
     pub ty: Option<TypeHandle<'a>>,
 }
 impl<'a> Node for Param<'a> {}
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq)]
 pub struct InOutTypes<'a>(pub Vec<Handle<'a, InOutType<'a>>>);
 impl<'a> Node for InOutTypes<'a> {}
 
 /// Input/output type pair for a command
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq)]
 pub struct InOutType<'a>(pub TypeHandle<'a>, pub TypeHandle<'a>);
 impl<'a> Node for InOutType<'a> {}
 
 pub type TypeHandle<'a> = Handle<'a, Type<'a>>;
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq)]
 pub struct Type<'a> {
-    pub name: Span,
+    pub name: NodeId,
     pub params: Option<Handle<'a, TypeArgs<'a>>>,
     pub optional: bool,
 }
 impl<'a> Node for Type<'a> {}
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq)]
 pub struct TypeArgs<'a>(pub Vec<TypeHandle<'a>>);
 impl<'a> Node for TypeArgs<'a> {}
 
@@ -315,17 +323,22 @@ impl BinOp {
     }
 }
 
-impl<'a> Parser<'a> {
-    pub fn new(compiler: &'a mut Compiler, tokens: Tokens) -> Self {
+impl<'parser, 'a> Parser<'parser, 'a> {
+    pub fn new(compiler: &'parser mut Compiler<'a>, tokens: Tokens) -> Self {
         Self { compiler, tokens }
+    }
+
+    pub fn run_parser(compiler: &'parser mut Compiler<'a>, tokens: Tokens) {
+        let parser = Self::new(compiler, tokens);
+        parser.parse();
     }
 
     fn position(&self) -> usize {
         self.tokens.peek_span().start
     }
 
-    fn get_span_end<T>(&self, node: &Spanned<T>) -> usize {
-        node.span.end
+    fn get_span_end<T>(&self, node: &Handle<'a, T>) -> usize {
+        self.compiler.get_span(node.id).end
     }
 
     pub fn parse(mut self) {
@@ -334,17 +347,17 @@ impl<'a> Parser<'a> {
         self.compiler.entry_points.push(entry);
     }
 
-    pub fn expression_or_assignment(&'a mut self) -> ExprHandle<'a> {
+    pub fn expression_or_assignment(&mut self) -> ExprHandle<'a> {
         let _span = span!();
         self.math_expression(true)
     }
 
-    pub fn expression(&'a mut self) -> ExprHandle<'a> {
+    pub fn expression(&mut self) -> ExprHandle<'a> {
         let _span = span!();
         self.math_expression(false)
     }
 
-    pub fn math_expression(&'a mut self, allow_assignment: bool) -> ExprHandle<'a> {
+    pub fn math_expression(&mut self, allow_assignment: bool) -> ExprHandle<'a> {
         let _span = span!();
         let mut expr_stack = Vec::<(Handle<'a, BinOp>, ExprHandle)>::new();
 
@@ -367,12 +380,12 @@ impl<'a> Parser<'a> {
 
         if self.is_equals() {
             if !allow_assignment {
-                self.error("assignment found in expression");
+                self.add_error("assignment found in expression");
             }
             let op = self.operator();
 
             let rhs = self.expression();
-            let span_end = self.get_span_end(rhs);
+            let span_end = self.get_span_end(&rhs);
 
             return self.create_node(
                 Expr::BinaryOp {
@@ -392,23 +405,23 @@ impl<'a> Parser<'a> {
                 let missing_space_after_op = !self.is_horizontal_space();
 
                 if missing_space_before_op {
-                    self.error_on_node("missing space before operator", op);
+                    self.error_on_node("missing space before operator", &op);
                 }
 
                 if missing_space_after_op {
-                    self.error_on_node("missing space after operator", op);
+                    self.error_on_node("missing space after operator", &op);
                 }
 
-                let op_prec = op.val.precedence();
+                let op_prec = op.item.precedence();
 
                 if op_prec == ASSIGNMENT_PRECEDENCE && !allow_assignment {
-                    self.error_on_node("assignment found in expression", op);
+                    self.error_on_node("assignment found in expression", &op);
                 }
 
                 let rhs = if self.is_simple_expression() {
                     self.simple_expression(BarewordContext::Call)
                 } else {
-                    self.my_error("incomplete math expression", Expr::Garbage)
+                    self.error_create_node("incomplete math expression", Expr::Garbage)
                 };
 
                 while op_prec <= last_prec {
@@ -416,7 +429,7 @@ impl<'a> Parser<'a> {
                         break;
                     };
 
-                    last_prec = op.val.precedence();
+                    last_prec = op.item.precedence();
 
                     if last_prec < op_prec {
                         expr_stack.push((op, rhs));
@@ -426,13 +439,13 @@ impl<'a> Parser<'a> {
                     // TODO merge these two branches together like they used to be
                     if let Some(l) = expr_stack.pop() {
                         let lhs = l.1;
-                        let (span_start, span_end) = self.spanning(lhs, rhs);
+                        let (span_start, span_end) = self.spanning(&lhs, &rhs);
                         expr_stack.push((
                             l.0,
                             self.create_node(Expr::BinaryOp { lhs, op, rhs }, span_start, span_end),
                         ));
                     } else {
-                        let (span_start, span_end) = self.spanning(leftmost, rhs);
+                        let (span_start, span_end) = self.spanning(&leftmost, &rhs);
                         leftmost = self.create_node(
                             Expr::BinaryOp {
                                 lhs: leftmost,
@@ -457,13 +470,13 @@ impl<'a> Parser<'a> {
             // TODO merge these two branches together like they used to be
             if let Some(l) = expr_stack.pop() {
                 let lhs = l.1;
-                let (span_start, span_end) = self.spanning(lhs, rhs);
+                let (span_start, span_end) = self.spanning(&lhs, &rhs);
                 expr_stack.push((
                     l.0,
                     self.create_node(Expr::BinaryOp { lhs, op, rhs }, span_start, span_end),
                 ));
             } else {
-                let (span_start, span_end) = self.spanning(leftmost, rhs);
+                let (span_start, span_end) = self.spanning(&leftmost, &rhs);
                 leftmost = self.create_node(
                     Expr::BinaryOp {
                         lhs: leftmost,
@@ -479,7 +492,7 @@ impl<'a> Parser<'a> {
         leftmost
     }
 
-    pub fn simple_expression(&'a mut self, bareword_context: BarewordContext) -> ExprHandle<'a> {
+    pub fn simple_expression(&mut self, bareword_context: BarewordContext) -> ExprHandle<'a> {
         let _span = span!();
 
         // skip comments and newlines
@@ -496,7 +509,7 @@ impl<'a> Parser<'a> {
             Token::LParen => {
                 self.tokens.advance();
                 if self.tokens.peek_token() == Token::RParen {
-                    self.my_error("use null instead of ()", Expr::Garbage)
+                    self.error_create_node("use null instead of ()", Expr::Garbage)
                 } else {
                     let output = self.expression();
                     self.rparen();
@@ -518,7 +531,7 @@ impl<'a> Parser<'a> {
                     BarewordContext::Call => self.call(),
                 },
             },
-            _ => self.my_error("incomplete expression", Expr::Garbage),
+            _ => self.error_create_node("incomplete expression", Expr::Garbage),
         };
 
         loop {
@@ -532,11 +545,11 @@ impl<'a> Parser<'a> {
                     // TODO: implement range from
                     //
                     // TODO: tweak the garbage location.
-                    self.error("incomplete range");
+                    self.add_error("incomplete range");
                     return expr;
                 } else {
                     let rhs = self.simple_expression(BarewordContext::String);
-                    let span_end = self.get_span_end(rhs);
+                    let span_end = self.get_span_end(&rhs);
 
                     expr = self.create_node(Expr::Range { lhs: expr, rhs }, span_start, span_end);
                 }
@@ -545,18 +558,18 @@ impl<'a> Parser<'a> {
                 self.tokens.advance();
 
                 if self.is_horizontal_space() {
-                    self.error("missing path name");
+                    self.add_error("missing path name");
                     return expr;
                 }
 
                 let name = self.name();
 
                 let field_or_call = if self.is_lparen() {
-                    self.variable().span
+                    self.variable().id
                 } else {
-                    name.span
+                    name
                 };
-                let span_end = field_or_call.end;
+                let span_end = self.compiler.get_span(field_or_call).end;
 
                 expr = self.create_node(
                     Expr::MemberAccess {
@@ -572,28 +585,27 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn advance_node<T: Node + 'a>(&'a mut self, node: T, span: Span) -> Handle<'a, T> {
+    pub fn advance_node<T: Node + 'a>(&mut self, node: T, span: Span) -> Handle<'a, T> {
         self.tokens.advance();
         self.create_node(node, span.start, span.end)
     }
 
-    pub fn variable(&'a mut self) -> ExprHandle<'a> {
+    pub fn variable(&mut self) -> Handle<'a, Expr<'a>> {
         if self.is_dollar() {
             let span_start = self.position();
             self.tokens.advance();
 
             if let (Token::Bareword, name_span) = self.tokens.peek() {
-                self.tokens.advance();
-                self.create_node(Expr::VarRef, span_start, name_span.end)
+                self.advance_node(Expr::VarRef, Span::new(span_start, name_span.end))
             } else {
-                self.my_error("variable name must be a bareword", Expr::Garbage)
+                self.error_create_node("variable name must be a bareword", Expr::Garbage)
             }
         } else {
-            self.my_error("expected variable starting with '$'", Expr::Garbage)
+            self.error_create_node("expected variable starting with '$'", Expr::Garbage)
         }
     }
 
-    pub fn variable_decl(&'a mut self) -> Span {
+    pub fn variable_decl(&mut self) -> NodeId {
         let _span = span!();
 
         let span_start = self.position();
@@ -603,15 +615,14 @@ impl<'a> Parser<'a> {
         }
 
         if let (Token::Bareword, name_span) = self.tokens.peek() {
-            self.tokens.advance();
-            Span::new(span_start, name_span.end)
+            self.advance_node(AstNode::Name, Span::new(span_start, name_span.end))
+                .id
         } else {
-            self.error("variable assignment name must be a bareword")
-                .span
+            self.add_error("variable assignment name must be a bareword")
         }
     }
 
-    pub fn call(&'a mut self) -> ExprHandle<'a> {
+    pub fn call(&mut self) -> ExprHandle<'a> {
         let _span = span!();
         let mut parts = vec![self.call_name()];
         let mut is_head = true;
@@ -639,7 +650,7 @@ impl<'a> Parser<'a> {
         self.create_node(Expr::Call { parts }, span_start, span_end)
     }
 
-    pub fn list_or_table(&'a mut self) -> ExprHandle<'a> {
+    pub fn list_or_table(&mut self) -> ExprHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         let mut is_table = false;
@@ -658,16 +669,16 @@ impl<'a> Parser<'a> {
                 self.tokens.advance();
             } else if self.is_semicolon() {
                 if items.len() != 1 {
-                    self.error("semicolon to create table should immediately follow headers");
-                } else if !matches!(items[0].val, Expr::List(_)) {
-                    self.error_on_node("tables require a list for their headers", items[0])
+                    self.add_error("semicolon to create table should immediately follow headers");
+                } else if !matches!(items[0].item, Expr::List(_)) {
+                    self.error_on_node("tables require a list for their headers", &items[0])
                 }
                 self.tokens.advance();
                 is_table = true;
             } else if self.is_simple_expression() {
                 items.push(self.simple_expression(BarewordContext::String));
             } else {
-                items.push(self.my_error("expected list item", Expr::Garbage));
+                items.push(self.error_create_node("expected list item", Expr::Garbage));
                 if self.is_eof() {
                     // prevent forever looping if there is no token to put the error on
                     break;
@@ -690,7 +701,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn record_or_closure(&'a mut self) -> ExprHandle<'a> {
+    pub fn record_or_closure(&mut self) -> ExprHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         let mut span_end = self.position(); // TODO: make sure we only initialize it expectedly
@@ -769,7 +780,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn operator(&'a mut self) -> Handle<'a, BinOp> {
+    pub fn operator(&mut self) -> Handle<'a, BinOp> {
         let (token, span) = self.tokens.peek();
 
         match token {
@@ -800,47 +811,49 @@ impl<'a> Parser<'a> {
                 b"and" => self.advance_node(BinOp::And, span),
                 b"xor" => self.advance_node(BinOp::Xor, span),
                 b"or" => self.advance_node(BinOp::Or, span),
-                op => self.my_error(
+                op => self.error_create_node(
                     format!("Unknown operator: '{}'", String::from_utf8_lossy(op)),
                     BinOp::Unknown,
                 ),
             },
             _ => {
                 // TODO is this case even reachable? Perhaps BinOp::Unknown is unnecessary
-                self.my_error("expected: operator", BinOp::Unknown)
+                self.error_create_node("expected: operator", BinOp::Unknown)
             }
         }
     }
 
-    pub fn spanning<A, B>(&'a mut self, from: &Spanned<A>, to: &Spanned<B>) -> (usize, usize) {
-        (from.span.start, to.span.end)
+    pub fn spanning<A, B>(&mut self, from: &Handle<'a, A>, to: &Handle<'a, B>) -> (usize, usize) {
+        (
+            self.compiler.get_span(from.id).start,
+            self.compiler.get_span(to.id).end,
+        )
     }
 
-    pub fn string(&'a mut self) -> Span {
+    pub fn string(&mut self) -> NodeId {
         match self.tokens.peek() {
             (Token::DoubleQuotedString, span) | (Token::SingleQuotedString, span) => {
-                self.advance_node(Expr::String { bareword: false }, span)
-                    .span
+                self.advance_node(Expr::String { bareword: false }, span).id
             }
-            _ => self.error("expected: string").span,
+            _ => self.add_error("expected: string"),
         }
     }
 
-    pub fn bareword_string(&'a mut self) -> ExprHandle<'a> {
+    pub fn bareword_string(&mut self) -> ExprHandle<'a> {
         match self.tokens.peek() {
             (Token::Bareword, span) => self.advance_node(Expr::String { bareword: true }, span),
-            _ => self.my_error("expected: name", Expr::Garbage),
+            _ => self.error_create_node("expected: name", Expr::Garbage),
         }
     }
 
-    pub fn name(&'a mut self) -> Handle<'a, AstNode> {
+    pub fn name(&mut self) -> NodeId {
         match self.tokens.peek() {
-            (Token::Bareword, span) => self.advance_node(AstNode::Name, span),
-            _ => self.error("expected: name"),
+            (Token::Bareword, span) => self.advance_node(AstNode::Name, span).id,
+            _ => self.add_error("expected: name"),
         }
     }
 
-    pub fn call_name(&'a mut self) -> ExprHandle<'a> {
+    pub fn call_name(&mut self) -> ExprHandle<'a> {
         let (mut token, mut span) = self.tokens.peek();
 
         loop {
@@ -867,7 +880,7 @@ impl<'a> Parser<'a> {
         self.tokens.peek_token() != Token::Eof
     }
 
-    pub fn match_expression(&'a mut self) -> ExprHandle<'a> {
+    pub fn match_expression(&mut self) -> ExprHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         let span_end;
@@ -878,7 +891,7 @@ impl<'a> Parser<'a> {
         let mut match_arms = vec![];
 
         if !self.is_lcurly() {
-            return self.my_error("expected left curly brace '{'", Expr::Garbage);
+            return self.error_create_node("expected left curly brace '{'", Expr::Garbage);
         }
 
         self.lcurly();
@@ -892,7 +905,7 @@ impl<'a> Parser<'a> {
                 let pattern = self.simple_expression(BarewordContext::String);
 
                 if !self.is_thick_arrow() {
-                    return self.my_error(
+                    return self.error_create_node(
                         "expected thick arrow (=>) between match cases",
                         Expr::Garbage,
                     );
@@ -909,14 +922,14 @@ impl<'a> Parser<'a> {
             } else if self.is_newline() {
                 self.tokens.advance();
             } else {
-                return self.my_error("expected match arm in match", Expr::Garbage);
+                return self.error_create_node("expected match arm in match", Expr::Garbage);
             }
         }
 
         self.create_node(Expr::Match { target, match_arms }, span_start, span_end)
     }
 
-    pub fn if_expression(&'a mut self) -> ExprHandle<'a> {
+    pub fn if_expression(&mut self) -> ExprHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         let span_end;
@@ -939,13 +952,13 @@ impl<'a> Parser<'a> {
                 self.match_expression()
             } else {
                 let block = self.block(BlockContext::Curlies);
-                let span = block.span;
-                self.create_node(Expr::Block(block.val), span.start, span.end)
+                let span = self.compiler.get_span(block.id);
+                self.create_node(Expr::Block(block.item), span.start, span.end)
             };
-            span_end = self.get_span_end(block);
+            span_end = self.get_span_end(&block);
             Some(block)
         } else {
-            span_end = self.get_span_end(then_block);
+            span_end = self.get_span_end(&then_block);
             None
         };
 
@@ -962,7 +975,7 @@ impl<'a> Parser<'a> {
 
     // directly ripped from `type_params` just changed delimiters
     // FIXME: simplify if appropriate
-    pub fn signature_params(&'a mut self, params_context: ParamsContext) -> Handle<'a, Params<'a>> {
+    pub fn signature_params(&mut self, params_context: ParamsContext) -> Handle<'a, Params<'a>> {
         let _span = span!();
         let span_start = self.position();
         let span_end;
@@ -1004,21 +1017,14 @@ impl<'a> Parser<'a> {
                     None
                 };
 
-                let name_span = name.span;
+                let name_span = self.compiler.get_span(name);
                 let param_span_end = if let Some(ty_id) = &ty {
-                    self.compiler.spans[ty_id.id.0].end
+                    self.get_span_end(ty_id)
                 } else {
                     name_span.end
                 };
 
-                let param = self.create_node(
-                    Param {
-                        name: name_span,
-                        ty,
-                    },
-                    name_span.start,
-                    param_span_end,
-                );
+                let param = self.create_node(Param { name, ty }, name_span.start, param_span_end);
 
                 // output.push(self.name());
                 output.push(param);
@@ -1037,7 +1043,7 @@ impl<'a> Parser<'a> {
         self.create_node(Params(param_list), span_start, span_end)
     }
 
-    pub fn type_params(&'a mut self) -> Handle<'a, TypeArgs<'a>> {
+    pub fn type_params(&mut self) -> Handle<'a, TypeArgs<'a>> {
         let _span = span!();
         let span_start = self.position();
         let span_end;
@@ -1068,10 +1074,10 @@ impl<'a> Parser<'a> {
         self.create_node(TypeArgs(param_list), span_start, span_end)
     }
 
-    pub fn typename(&'a mut self) -> TypeHandle<'a> {
+    pub fn typename(&mut self) -> TypeHandle<'a> {
         let _span = span!();
         if let (Token::Bareword, span) = self.tokens.peek() {
-            let name = self.name().span;
+            let name = self.name();
             let mut params = None;
             if self.is_less_than() {
                 // We have generics
@@ -1096,7 +1102,7 @@ impl<'a> Parser<'a> {
                 span.end,
             )
         } else {
-            let garbage = self.error("expected name");
+            let garbage = self.add_error("expected name");
             let span = self.compiler.get_span(garbage);
             self.create_node(
                 Type {
@@ -1110,7 +1116,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn in_out_type(&'a mut self) -> Handle<'a, InOutType<'a>> {
+    pub fn in_out_type(&mut self) -> Handle<'a, InOutType<'a>> {
         let _span = span!();
         let span_start = self.position();
 
@@ -1122,7 +1128,7 @@ impl<'a> Parser<'a> {
         self.create_node(InOutType(in_ty, out_ty), span_start, span_end)
     }
 
-    pub fn in_out_types(&'a mut self) -> Handle<'a, InOutTypes<'a>> {
+    pub fn in_out_types(&mut self) -> Handle<'a, InOutTypes<'a>> {
         let _span = span!();
         self.colon();
 
@@ -1156,18 +1162,18 @@ impl<'a> Parser<'a> {
         }
     }
 
-    pub fn def_statement(&'a mut self) -> StmtHandle<'a> {
+    pub fn def_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let span_start = self.position();
 
         self.keyword(b"def");
 
         let name = match self.tokens.peek() {
-            (Token::Bareword, span) => self.advance_node(AstNode::Name, span).span,
+            (Token::Bareword, span) => self.advance_node(AstNode::Name, span).id,
             (Token::DoubleQuotedString | Token::SingleQuotedString, span) => {
-                self.advance_node(Expr::String { bareword: false }, span).span
+                self.advance_node(Expr::String { bareword: false }, span).id
             }
-            _ => return self.my_error("expected def name", Stmt::Garbage),
+            _ => return self.error_create_node("expected def name", Stmt::Garbage),
         };
 
         let params = self.signature_params(ParamsContext::Squares);
@@ -1178,7 +1184,7 @@ impl<'a> Parser<'a> {
         };
         let block = self.block(BlockContext::Curlies);
 
-        let span_end = self.get_span_end(block.id);
+        let span_end = self.get_span_end(&block);
 
         self.create_node(
             Stmt::Def(Def {
@@ -1193,7 +1199,7 @@ impl<'a> Parser<'a> {
     }
 
     // TODO: Deduplicate code between let/mut/const assignments
-    pub fn let_statement(&'a mut self) -> StmtHandle<'a> {
+    pub fn let_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let is_mutable = false;
         let span_start = self.position();
@@ -1215,7 +1221,7 @@ impl<'a> Parser<'a> {
 
         let initializer = self.expression();
 
-        let span_end = self.get_span_end(initializer.id);
+        let span_end = self.get_span_end(&initializer);
 
         self.create_node(
             Stmt::Let {
@@ -1230,7 +1236,7 @@ impl<'a> Parser<'a> {
     }
 
     // TODO: Deduplicate code between let/mut/const assignments
-    pub fn mut_statement(&'a mut self) -> StmtHandle<'a> {
+    pub fn mut_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let is_mutable = true;
         let span_start = self.position();
@@ -1252,7 +1258,7 @@ impl<'a> Parser<'a> {
 
         let initializer = self.expression();
 
-        let span_end = self.get_span_end(initializer.id);
+        let span_end = self.get_span_end(&initializer);
 
         self.create_node(
             Stmt::Let {
@@ -1266,19 +1272,19 @@ impl<'a> Parser<'a> {
         )
     }
 
-    pub fn keyword(&'a mut self, keyword: &[u8]) {
+    pub fn keyword(&mut self, keyword: &[u8]) {
         let _span = span!();
         if self.is_keyword(keyword) {
             self.tokens.advance();
         } else {
-            self.error(format!(
+            self.add_error(format!(
                 "expected keyword: {}",
                 String::from_utf8_lossy(keyword)
             ));
         }
     }
 
-    pub fn block(&'a mut self, context: BlockContext) -> BlockHandle<'a> {
+    pub fn block(&mut self, context: BlockContext) -> BlockHandle<'a> {
         let _span = span!();
         let span_start = self.position();
 
@@ -1320,7 +1326,7 @@ impl<'a> Parser<'a> {
             } else {
                 let exp_span_start = self.position();
                 let expression = self.expression_or_assignment();
-                let exp_span_end = self.get_span_end(expression.id);
+                let exp_span_end = self.get_span_end(&expression);
 
                 if self.is_semicolon() {
                     // This is a statement, not an expression
@@ -1351,25 +1357,25 @@ impl<'a> Parser<'a> {
         )
     }
 
-    pub fn while_statement(&'a mut self) -> StmtHandle<'a> {
+    pub fn while_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         self.keyword(b"while");
 
         if self.is_operator() {
             // TODO: flag parsing
-            self.error("WIP: Flags on while are not supported yet");
+            self.add_error("WIP: Flags on while are not supported yet");
             self.tokens.advance();
         }
 
         let condition = self.expression();
         let block = self.block(BlockContext::Curlies);
-        let span_end = self.get_span_end(block);
+        let span_end = self.get_span_end(&block);
 
         self.create_node(Stmt::While { condition, block }, span_start, span_end)
     }
 
-    pub fn for_statement(&'a mut self) -> StmtHandle<'a> {
+    pub fn for_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         self.keyword(b"for");
@@ -1379,7 +1385,7 @@ impl<'a> Parser<'a> {
 
         let range = self.simple_expression(BarewordContext::String);
         let block = self.block(BlockContext::Curlies);
-        let span_end = self.get_span_end(block);
+        let span_end = self.get_span_end(&block);
 
         self.create_node(
             Stmt::For {
@@ -1392,17 +1398,17 @@ impl<'a> Parser<'a> {
         )
     }
 
-    pub fn loop_statement(&'a mut self) -> StmtHandle<'a> {
+    pub fn loop_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         self.keyword(b"loop");
         let block = self.block(BlockContext::Curlies);
-        let span_end = self.get_span_end(block.id);
+        let span_end = self.get_span_end(&block);
 
         self.create_node(Stmt::Loop { block }, span_start, span_end)
     }
 
-    pub fn return_statement(&'a mut self) -> StmtHandle<'a> {
+    pub fn return_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         let span_end;
@@ -1411,7 +1417,7 @@ impl<'a> Parser<'a> {
 
         let ret_val = if self.is_expression() {
             let expr = self.expression();
-            span_end = self.get_span_end(expr);
+            span_end = self.get_span_end(&expr);
             Some(expr)
         } else {
             span_end = span_start + b"return".len();
@@ -1421,7 +1427,7 @@ impl<'a> Parser<'a> {
         self.create_node(Stmt::Return(ret_val), span_start, span_end)
     }
 
-    pub fn continue_statement(&'a mut self) -> StmtHandle<'a> {
+    pub fn continue_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         self.keyword(b"continue");
@@ -1430,7 +1436,7 @@ impl<'a> Parser<'a> {
         self.create_node(Stmt::Continue, span_start, span_end)
     }
 
-    pub fn break_statement(&'a mut self) -> StmtHandle<'a> {
+    pub fn break_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         self.keyword(b"break");
@@ -1439,7 +1445,7 @@ impl<'a> Parser<'a> {
         self.create_node(Stmt::Break, span_start, span_end)
     }
 
-    pub fn alias_statement(&'a mut self) -> StmtHandle<'a> {
+    pub fn alias_statement(&mut self) -> StmtHandle<'a> {
         let _span = span!();
         let span_start = self.position();
         self.keyword(b"alias");
@@ -1454,11 +1460,11 @@ impl<'a> Parser<'a> {
         } else {
             self.name()
         };
-        let span_end = self.get_span_end(old_name);
+        let span_end = self.compiler.get_span(old_name).end;
         self.create_node(Stmt::Alias { new_name, old_name }, span_start, span_end)
     }
 
-    pub fn is_operator(&'a mut self) -> bool {
+    pub fn is_operator(&mut self) -> bool {
         let (token, span) = self.tokens.peek();
 
         match token {
@@ -1637,15 +1643,19 @@ impl<'a> Parser<'a> {
             || self.is_name()
     }
 
-    pub fn error_on_node<T>(&'a mut self, message: impl Into<String>, node: &Spanned<T>) {
+    pub fn error_on_node<T>(&mut self, message: impl Into<String>, node: &WithId<T>) {
         self.compiler.errors.push(SourceError {
             message: message.into(),
-            span: node.span,
+            node_id: node.id,
             severity: Severity::Error,
         });
     }
 
-    pub fn my_error<T: Node>(&'a mut self, message: impl Into<String>, node: T) -> Handle<'a, T> {
+    pub fn error_create_node<T: Node>(
+        &mut self,
+        message: impl Into<String>,
+        node: T,
+    ) -> Handle<'a, T> {
         let (token, span) = self.tokens.peek();
 
         if token != Token::Eof {
@@ -1655,24 +1665,24 @@ impl<'a> Parser<'a> {
         let node = self.create_node(node, span.start, span.end);
         self.compiler.errors.push(SourceError {
             message: message.into(),
-            span: node.span,
+            node_id: node.id,
             severity: Severity::Error,
         });
 
         node
     }
 
-    pub fn error(&'a mut self, message: impl Into<String>) -> Handle<'a, AstNode> {
+    pub fn add_error(&mut self, message: impl Into<String>) -> NodeId {
         let (token, span) = self.tokens.peek();
 
         if token != Token::Eof {
             self.tokens.advance();
         }
 
-        let node_id = self.create_node(AstNode::Garbage, span.start, span.end);
+        let node_id = self.create_node(AstNode::Garbage, span.start, span.end).id;
         self.compiler.errors.push(SourceError {
             message: message.into(),
-            span: node_id.span,
+            node_id,
             severity: Severity::Error,
         });
 
@@ -1680,125 +1690,125 @@ impl<'a> Parser<'a> {
     }
 
     pub fn create_node<T: Node>(
-        &'a self,
+        &mut self,
         ast_node: T,
         span_start: usize,
         span_end: usize,
     ) -> Handle<'a, T> {
-        self.compiler.push_node(Spanned {
-            span: Span {
+        self.compiler.push_node(
+            ast_node,
+            Span {
                 start: span_start,
                 end: span_end,
             },
-            val: ast_node,
-        })
+        )
     }
 
-    pub fn lparen(&'a mut self) {
+    pub fn lparen(&mut self) {
         if self.is_lparen() {
             self.tokens.advance();
         } else {
-            self.error("expected: left paren '('");
+            self.add_error("expected: left paren '('");
         }
     }
 
-    pub fn rparen(&'a mut self) {
+    pub fn rparen(&mut self) {
         if self.is_rparen() {
             self.tokens.advance();
         } else {
-            self.error("expected: right paren ')'");
+            self.add_error("expected: right paren ')'");
         }
     }
 
-    pub fn lsquare(&'a mut self) {
+    pub fn lsquare(&mut self) {
         if self.is_lsquare() {
             self.tokens.advance();
         } else {
-            self.error("expected: left bracket '['");
+            self.add_error("expected: left bracket '['");
         }
     }
 
-    pub fn rsquare(&'a mut self) {
+    pub fn rsquare(&mut self) {
         if self.is_rsquare() {
             self.tokens.advance();
         } else {
-            self.error("expected: right bracket ']'");
+            self.add_error("expected: right bracket ']'");
         }
     }
 
-    pub fn lcurly(&'a mut self) {
+    pub fn lcurly(&mut self) {
         if self.is_lcurly() {
             self.tokens.advance();
         } else {
-            self.error("expected: left bracket '{'");
+            self.add_error("expected: left bracket '{'");
         }
     }
 
-    pub fn rcurly(&'a mut self) {
+    pub fn rcurly(&mut self) {
         if self.is_rcurly() {
             self.tokens.advance();
         } else {
-            self.error("expected: right bracket '}'");
+            self.add_error("expected: right bracket '}'");
         }
     }
 
-    pub fn pipe(&'a mut self) {
+    pub fn pipe(&mut self) {
         if self.is_pipe() {
             self.tokens.advance();
         } else {
-            self.error("expected: pipe symbol '|'");
+            self.add_error("expected: pipe symbol '|'");
         }
     }
 
-    pub fn less_than(&'a mut self) {
+    pub fn less_than(&mut self) {
         if self.is_less_than() {
             self.tokens.advance();
         } else {
-            self.error("expected: less than/left angle bracket '<'");
+            self.add_error("expected: less than/left angle bracket '<'");
         }
     }
 
-    pub fn greater_than(&'a mut self) {
+    pub fn greater_than(&mut self) {
         if self.is_greater_than() {
             self.tokens.advance();
         } else {
-            self.error("expected: greater than/right angle bracket '>'");
+            self.add_error("expected: greater than/right angle bracket '>'");
         }
     }
 
-    pub fn equals(&'a mut self) {
+    pub fn equals(&mut self) {
         if self.is_equals() {
             self.tokens.advance();
         } else {
-            self.error("expected: equals '='");
+            self.add_error("expected: equals '='");
         }
     }
 
-    pub fn thin_arrow(&'a mut self) {
+    pub fn thin_arrow(&mut self) {
         if self.is_thin_arrow() {
             self.tokens.advance();
         } else {
-            self.error("expected: thin arrow '->'");
+            self.add_error("expected: thin arrow '->'");
         }
     }
 
-    pub fn colon(&'a mut self) {
+    pub fn colon(&mut self) {
         if self.is_colon() {
             self.tokens.advance();
         } else {
-            self.error("expected: colon ':'");
+            self.add_error("expected: colon ':'");
         }
     }
 
-    pub fn comma(&'a mut self) {
+    pub fn comma(&mut self) {
         if self.is_comma() {
             self.tokens.advance();
         } else {
-            self.error("expected: comma ','");
+            self.add_error("expected: comma ','");
         }
     }
 
-    pub fn skip_newlines(&'a mut self) {
+    pub fn skip_newlines(&mut self) {
         while self.is_newline() {
             self.tokens.advance();
         }
@@ -1808,7 +1818,7 @@ impl<'a> Parser<'a> {
         self.compiler.get_rollback_point(self.tokens.pos())
     }
 
-    fn apply_rollback(&'a mut self, rbp: RollbackPoint) {
+    fn apply_rollback(&mut self, rbp: RollbackPoint) {
         let token_pos = self.compiler.apply_compiler_rollback(rbp);
         self.tokens.set_pos(token_pos);
     }

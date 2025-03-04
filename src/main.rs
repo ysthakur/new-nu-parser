@@ -51,9 +51,9 @@ fn main() {
             tokens.print(&compiler.source);
         }
 
-        let parser = Parser::new(compiler, tokens);
+        let parser = Parser::new(&mut compiler, tokens);
 
-        compiler = parser.parse();
+        parser.parse();
 
         if do_print {
             compiler.print();

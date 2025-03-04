@@ -1,4 +1,4 @@
-use crate::parser::{Def, Expr, ExprHandle, Stmt, StmtHandle};
+use crate::parser::{Def, Expr, ExprHandle, Stmt, WithId};
 use crate::protocol::{Command, Declaration};
 use crate::{
     compiler::Compiler,
@@ -26,16 +26,16 @@ pub struct Frame {
     pub variables: HashMap<Vec<u8>, NodeId>,
     pub decls: HashMap<Vec<u8>, NodeId>,
     /// Node that defined the scope frame (e.g., a block or overlay)
-    pub node_id: NodeId,
+    pub block_id: BlockId,
 }
 
 impl Frame {
-    pub fn new(scope_type: FrameType, node_id: NodeId) -> Self {
+    pub fn new(scope_type: FrameType, block_id: BlockId) -> Self {
         Frame {
             frame_type: scope_type,
             variables: HashMap::new(),
             decls: HashMap::new(),
-            node_id,
+            block_id,
         }
     }
 }
@@ -82,9 +82,9 @@ impl Default for NameBindings {
     }
 }
 
-pub struct Resolver<'a> {
+pub struct Resolver<'r, 'a> {
     // Immutable reference to a compiler after the first parsing pass
-    compiler: &'a Compiler<'a>,
+    compiler: &'r Compiler<'a>,
 
     /// All scope frames ever entered, indexed by ScopeId
     pub scope: Vec<Frame>,
@@ -102,8 +102,8 @@ pub struct Resolver<'a> {
     pub errors: Vec<SourceError>,
 }
 
-impl<'a> Resolver<'a> {
-    pub fn new(compiler: &'a Compiler) -> Self {
+impl<'r, 'a> Resolver<'r, 'a> {
+    pub fn new(compiler: &'r Compiler<'a>) -> Self {
         Self {
             compiler,
             scope: vec![],
@@ -140,8 +140,8 @@ impl<'a> Resolver<'a> {
         result.push_str("==== SCOPE ====\n");
         for (i, scope) in self.scope.iter().enumerate() {
             result.push_str(&format!(
-                "{i}: Frame {0:?}, node_id: {1:?}",
-                scope.frame_type, scope.node_id
+                "{i}: Frame {0:?}, block_id: {1:?}",
+                scope.frame_type, scope.block_id
             ));
 
             let mut vars: Vec<String> = scope
@@ -191,49 +191,49 @@ impl<'a> Resolver<'a> {
 
     pub fn resolve(&mut self) {
         for entry in &self.compiler.entry_points {
-            self.enter_scope(entry.id);
-            self.resolve_block(entry.id, *entry.node, None);
+            self.enter_scope(entry.item);
+            self.resolve_block(entry.item, None);
             self.exit_scope();
         }
     }
 
-    pub fn resolve_expr(&mut self, expr: ExprHandle<'a>) {
+    pub fn resolve_expr(&mut self, expr: &WithId<Expr<'a>>) {
         let node_id = expr.id;
-        match expr.node {
-            Expr::VarRef => self.resolve_variable(expr.id),
+        match &expr.item {
+            Expr::VarRef => self.resolve_variable(node_id),
             Expr::Call { ref parts } => self.resolve_call(expr.id, parts),
-            Expr::Block(block_id) => self.resolve_block(node_id, *block_id, None),
+            Expr::Block(block_id) => self.resolve_block(*block_id, None),
             Expr::Closure { params, block } => {
                 // making sure the closure parameters and body end up in the same scope frame
                 let closure_scope = if let Some(params) = params {
-                    self.enter_scope(block.id);
-                    for param in &params.node.0 {
-                        self.define_variable(param.node.name, false);
+                    self.enter_scope(block.item);
+                    for param in &params.item.0 {
+                        self.define_variable(param.item.name, false);
                     }
                     Some(self.exit_scope())
                 } else {
                     None
                 };
 
-                self.resolve_block(block.id, *block.node, closure_scope);
+                self.resolve_block(block.item, closure_scope);
             }
             Expr::BinaryOp { lhs, op: _, rhs } => {
-                self.resolve_expr(lhs.clone());
-                self.resolve_expr(rhs.clone());
+                self.resolve_expr(lhs);
+                self.resolve_expr(rhs);
             }
             Expr::Range { lhs, rhs } => {
-                self.resolve_expr(lhs.clone());
-                self.resolve_expr(rhs.clone());
+                self.resolve_expr(lhs);
+                self.resolve_expr(rhs);
             }
             Expr::List(ref items) => {
                 for item in items {
-                    self.resolve_expr(item.clone());
+                    self.resolve_expr(item);
                 }
             }
             Expr::Table { header, ref rows } => {
-                self.resolve_expr(header.clone());
+                self.resolve_expr(header);
                 for row in rows {
-                    self.resolve_expr(row.clone());
+                    self.resolve_expr(row);
                 }
             }
             Expr::Record { ref pairs } => {
@@ -252,7 +252,7 @@ impl<'a> Resolver<'a> {
                 else_block,
             } => {
                 self.resolve_expr(condition.clone());
-                self.resolve_block(then_block.id, *then_block.node, None);
+                self.resolve_block(then_block.item, None);
                 if let Some(block) = else_block {
                     self.resolve_expr(block.clone());
                 }
@@ -278,8 +278,8 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    pub fn resolve_stmt(&mut self, stmt: StmtHandle<'a>) {
-        match stmt.node {
+    pub fn resolve_stmt(&mut self, stmt: &WithId<Stmt<'a>>) {
+        match &stmt.item {
             Stmt::Def(Def {
                 name,
                 params,
@@ -290,13 +290,13 @@ impl<'a> Resolver<'a> {
                 self.define_decl(*name);
 
                 // making sure the def parameters and body end up in the same scope frame
-                self.enter_scope(block.id);
-                for param in &params.node.0 {
-                    self.define_variable(param.id, false);
+                self.enter_scope(block.item);
+                for param in &params.item.0 {
+                    self.define_variable(param.item.name, false);
                 }
                 let def_scope = self.exit_scope();
 
-                self.resolve_block(block.id, *block.node, Some(def_scope));
+                self.resolve_block(block.item, Some(def_scope));
             }
             Stmt::Alias {
                 new_name,
@@ -310,12 +310,12 @@ impl<'a> Resolver<'a> {
                 initializer,
                 is_mutable,
             } => {
-                self.resolve_expr(initializer.clone());
+                self.resolve_expr(&initializer);
                 self.define_variable(*variable_name, *is_mutable)
             }
             Stmt::While { condition, block } => {
                 self.resolve_expr(condition.clone());
-                self.resolve_block(block.id, *block.node, None);
+                self.resolve_block(block.item, None);
             }
             Stmt::For {
                 variable,
@@ -323,16 +323,16 @@ impl<'a> Resolver<'a> {
                 block,
             } => {
                 // making sure the for loop variable and body end up in the same scope frame
-                self.enter_scope(block.id);
+                self.enter_scope(block.item);
                 self.define_variable(*variable, false);
                 let for_body_scope = self.exit_scope();
 
                 self.resolve_expr(range.clone());
 
-                self.resolve_block(block.id, *block.node, Some(for_body_scope));
+                self.resolve_block(block.item, Some(for_body_scope));
             }
             Stmt::Loop { block } => {
-                self.resolve_block(block.id, *block.node, None);
+                self.resolve_block(block.item, None);
             }
             Stmt::Expr(expr) => self.resolve_expr(expr.clone()),
             Stmt::Return(expr) => {
@@ -367,15 +367,15 @@ impl<'a> Resolver<'a> {
         // Find out the potentially longest command name
         let max_name_parts = parts
             .iter()
-            .position(|part| matches!(part.node, Expr::String { bareword: true }))
+            .position(|part| matches!(part.item, Expr::String { bareword: true }))
             .expect("call does not have any name")
             + 1;
 
         // Try to find the longest matching subcommand
-        let first_start = self.compiler.spans[parts[0].id.0].start;
+        let first_start = self.compiler.get_span(parts[0].id).start;
 
         for n in (0..max_name_parts).rev() {
-            let last_end = self.compiler.spans[parts[n].id.0].end;
+            let last_end = self.compiler.get_span(parts[n].id).end;
             let name = self
                 .compiler
                 .get_span_contents_manual(first_start, last_end);
@@ -399,12 +399,7 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    pub fn resolve_block(
-        &mut self,
-        node_id: NodeId,
-        block_id: BlockId,
-        reused_scope: Option<ScopeId>,
-    ) {
+    pub fn resolve_block(&mut self, block_id: BlockId, reused_scope: Option<ScopeId>) {
         let block = self
             .compiler
             .blocks
@@ -414,11 +409,11 @@ impl<'a> Resolver<'a> {
         if let Some(scope_id) = reused_scope {
             self.enter_existing_scope(scope_id);
         } else {
-            self.enter_scope(node_id);
+            self.enter_scope(block_id);
         }
 
         for inner_node_id in &block.nodes {
-            self.resolve_stmt(inner_node_id.clone());
+            self.resolve_stmt(&inner_node_id);
         }
         self.exit_scope();
     }
@@ -429,8 +424,8 @@ impl<'a> Resolver<'a> {
     }
 
     /// Enter a new scope frame, e.g., a block or a closure
-    pub fn enter_scope(&mut self, node_id: NodeId) {
-        self.scope.push(Frame::new(FrameType::Scope, node_id));
+    pub fn enter_scope(&mut self, block_id: BlockId) {
+        self.scope.push(Frame::new(FrameType::Scope, block_id));
         self.scope_stack.push(ScopeId(self.scope.len() - 1));
     }
 

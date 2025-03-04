@@ -1,4 +1,4 @@
-use crate::compiler::Span;
+use crate::parser::NodeId;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Severity {
@@ -9,6 +9,6 @@ pub enum Severity {
 #[derive(Debug, Clone)]
 pub struct SourceError {
     pub message: String,
-    pub span: Span,
+    pub node_id: NodeId,
     pub severity: Severity,
 }

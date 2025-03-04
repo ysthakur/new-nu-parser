@@ -6,15 +6,15 @@ use nu_protocol::ir::{Instruction, IrBlock, Literal};
 use nu_protocol::{RegId, Span};
 
 /// Generates IR (Intermediate Representation) from nu AST.
-pub struct IrGenerator<'a> {
+pub struct IrGenerator<'ir, 'a> {
     // Immutable reference to a compiler after the typechecker pass
-    compiler: &'a Compiler<'a>,
+    compiler: &'ir Compiler<'a>,
     errors: Vec<SourceError>,
     block: IrBlock,
 }
 
-impl<'a> IrGenerator<'a> {
-    pub fn new(compiler: &'a Compiler) -> Self {
+impl<'ir, 'a> IrGenerator<'ir, 'a> {
+    pub fn new(compiler: &'ir Compiler<'a>) -> Self {
         Self {
             compiler,
             errors: Default::default(),
