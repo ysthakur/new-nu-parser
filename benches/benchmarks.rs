@@ -1,5 +1,6 @@
 use std::process::exit;
 
+use bumpalo::Bump;
 use new_nu_parser::lexer::{lex, Tokens};
 use nu_cmd_lang::{
     Break, Collect, Def, Echo, ExportCommand, ExportDef, For, If, Let, Module, Mut, Use,
@@ -48,13 +49,14 @@ const STAGES: &[Stage] = &[
 ];
 
 /// Set up compiler with selected stages pre-run
-fn setup_compiler(
+fn setup_compiler<'a>(
+    bump: &'a Bump,
     fname: &str,
     do_parse: bool,
     do_resolve: bool,
     do_typecheck: bool,
-) -> Result<(Compiler, usize), String> {
-    let mut compiler = Compiler::new();
+) -> Result<(Compiler<'a>, usize), String> {
+    let mut compiler = Compiler::new(&bump);
     let span_offset = compiler.span_offset();
 
     let contents = std::fs::read(fname).map_err(|_| format!("Cannot find file {fname}"))?;
@@ -68,8 +70,8 @@ fn setup_compiler(
     }
 
     if do_parse {
-        let parser = Parser::new(compiler, tokens);
-        compiler = parser.parse();
+        let parser = Parser::new(&mut compiler, tokens);
+        parser.parse();
 
         if !compiler.errors.is_empty() {
             return Err(format!("Error parsing file {fname}"));
@@ -102,9 +104,9 @@ fn setup_compiler(
 }
 
 /// Parse only
-pub fn parse(mut compiler: Compiler, tokens: Tokens) {
+pub fn parse(compiler: &mut Compiler, tokens: Tokens) {
     let parser = Parser::new(compiler, tokens);
-    compiler = parser.parse();
+    parser.parse();
 
     if !compiler.errors.is_empty() {
         eprintln!("Error resolving def.");
@@ -113,7 +115,7 @@ pub fn parse(mut compiler: Compiler, tokens: Tokens) {
 }
 
 /// Resolve only
-pub fn resolve(mut compiler: Compiler, do_merge: bool) {
+pub fn resolve(compiler: &mut Compiler, do_merge: bool) {
     let mut resolver = Resolver::new(&compiler);
     resolver.resolve();
 
@@ -128,7 +130,7 @@ pub fn resolve(mut compiler: Compiler, do_merge: bool) {
 }
 
 /// Typecheck only
-pub fn typecheck(mut compiler: Compiler, do_merge: bool) {
+pub fn typecheck(compiler: &mut Compiler, do_merge: bool) {
     let mut typechecker = Typechecker::new(&compiler);
     typechecker.typecheck();
 
@@ -143,7 +145,7 @@ pub fn typecheck(mut compiler: Compiler, do_merge: bool) {
 }
 
 /// Run all compiler stages
-pub fn compile(mut compiler: Compiler, span_offset: usize) {
+pub fn compile(compiler: &mut Compiler, span_offset: usize) {
     let (tokens, err) = lex(&compiler.source, span_offset);
     if let Err(e) = err {
         tokens.eprint(&compiler.source);
@@ -152,7 +154,7 @@ pub fn compile(mut compiler: Compiler, span_offset: usize) {
     }
 
     let parser = Parser::new(compiler, tokens);
-    compiler = parser.parse();
+    parser.parse();
 
     if !compiler.errors.is_empty() {
         eprintln!("Error resolving def.");
@@ -245,8 +247,9 @@ fn compiler_benchmarks() -> impl IntoBenchmarks {
                 Stage::Parse => {
                     let name = format!("{bench_name}_parse");
                     benchmark_fn(name, move |b| {
-                        let (compiler_def_init, span_offset) =
-                            setup_compiler(&bench_file, false, false, false)
+                        let bump = Box::leak(Box::new(Bump::new()));
+                        let (mut compiler_def_init, span_offset) =
+                            setup_compiler(bump, &bench_file, false, false, false)
                                 .expect("Error setting up compiler");
                         let contents = bench_contents.clone();
                         let (tokens, err) = lex(&contents, span_offset);
@@ -255,52 +258,57 @@ fn compiler_benchmarks() -> impl IntoBenchmarks {
                             eprintln!("Lexing error. Error: {:?}", e);
                             exit(1);
                         }
-                        b.iter(move || parse(compiler_def_init.clone(), tokens.clone()))
+                        b.iter(move || parse(&mut compiler_def_init, tokens.clone()))
                     })
                 }
                 Stage::Resolve => {
                     let name = format!("{bench_name}_resolve");
                     benchmark_fn(name, move |b| {
-                        let (compiler_def_parsed, _) =
-                            setup_compiler(&bench_file.clone(), true, false, false)
+                        let bump = Box::leak(Box::new(Bump::new()));
+                        let (mut compiler_def_parsed, _) =
+                            setup_compiler(bump, &bench_file.clone(), true, false, false)
                                 .expect("Error setting up compiler");
-                        b.iter(move || resolve(compiler_def_parsed.clone(), false))
+                        b.iter(move || resolve(&mut compiler_def_parsed, false))
                     })
                 }
                 Stage::ResolveMerge => {
                     let name = format!("{bench_name}_resolve_merge");
                     benchmark_fn(name, move |b| {
-                        let (compiler_def_parsed, _) =
-                            setup_compiler(&bench_file.clone(), true, false, false)
+                        let bump = Box::leak(Box::new(Bump::new()));
+                        let (mut compiler_def_parsed, _) =
+                            setup_compiler(bump, &bench_file.clone(), true, false, false)
                                 .expect("Error setting up compiler");
-                        b.iter(move || resolve(compiler_def_parsed.clone(), true))
+                        b.iter(move || resolve(&mut compiler_def_parsed, true))
                     })
                 }
                 Stage::Typecheck => {
                     let name = format!("{bench_name}_typecheck");
                     benchmark_fn(name, move |b| {
-                        let (compiler_def_parsed, _) =
-                            setup_compiler(&bench_file.clone(), true, true, false)
+                        let bump = Box::leak(Box::new(Bump::new()));
+                        let (mut compiler_def_parsed, _) =
+                            setup_compiler(bump, &bench_file.clone(), true, true, false)
                                 .expect("Error setting up compiler");
-                        b.iter(move || typecheck(compiler_def_parsed.clone(), false))
+                        b.iter(move || typecheck(&mut compiler_def_parsed, false))
                     })
                 }
                 Stage::TypecheckMerge => {
                     let name = format!("{bench_name}_typecheck_merge");
                     benchmark_fn(name, move |b| {
-                        let (compiler_def_parsed, _) =
-                            setup_compiler(&bench_file.clone(), true, true, false)
+                        let bump = Box::leak(Box::new(Bump::new()));
+                        let (mut compiler_def_parsed, _) =
+                            setup_compiler(bump, &bench_file.clone(), true, true, false)
                                 .expect("Error setting up compiler");
-                        b.iter(move || typecheck(compiler_def_parsed.clone(), true))
+                        b.iter(move || typecheck(&mut compiler_def_parsed, true))
                     })
                 }
                 Stage::Compile => {
                     let name = format!("{bench_name}_compile");
                     benchmark_fn(name, move |b| {
-                        let (compiler_def_init, span_offset) =
-                            setup_compiler(&bench_file.clone(), false, false, false)
+                        let bump = Box::leak(Box::new(Bump::new()));
+                        let (mut compiler_def_init, span_offset) =
+                            setup_compiler(bump, &bench_file.clone(), false, false, false)
                                 .expect("Error setting up compiler");
-                        b.iter(move || compile(compiler_def_init.clone(), span_offset))
+                        b.iter(move || compile(&mut compiler_def_init, span_offset))
                     })
                 }
                 Stage::Nu => {
