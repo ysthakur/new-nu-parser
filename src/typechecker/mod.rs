@@ -2,7 +2,16 @@ use crate::compiler::Compiler;
 use crate::errors::{Severity, SourceError};
 use crate::parser::{AstNode, NodeId};
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+pub struct CtxPart {
+    env: HashMap<String, Type>,
+    lvl: usize,
+}
+
+pub struct Ctx {
+    parts: Vec<CtxPart>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeId(pub usize);
@@ -19,6 +28,9 @@ pub struct RecordTypeId(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OneOfId(pub usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterTypeId(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Type {
@@ -44,6 +56,11 @@ pub enum Type {
     Record(RecordTypeId),
     OneOf(OneOfId),
     Error,
+
+    // Top,
+    // Bottom,
+    // Neg(TypeId),
+    // Inter(InterTypeId),
 }
 
 pub struct Types {
