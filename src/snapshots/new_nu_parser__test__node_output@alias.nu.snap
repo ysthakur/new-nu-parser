@@ -2,7 +2,6 @@
 source: src/test.rs
 expression: evaluate_example(path)
 input_file: tests/alias.nu
-snapshot_kind: text
 ---
 ==== COMPILER ====
 0: String (6 to 19) ""fancy alias""
