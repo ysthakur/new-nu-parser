@@ -13,16 +13,16 @@ struct TypeVar {
 }
 
 /// To represent the top type, make everything inside empty
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 struct Conj {
-    list: Option<TypeId>,
-    record: Option<RecordTypeId>,
-    type_vars: HashSet<TypeVarId>,
+    list: Option<Dnf>,
+    record: Vec<(String, Dnf)>,
+    type_vars: Vec<TypeVarId>,
     /// Something like Type::Int, Type::String, etc. included verbatim
     verbatim: Option<TypeId>,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 struct DnfPart {
     any: bool,
     pos: Conj,
@@ -30,7 +30,7 @@ struct DnfPart {
 }
 
 /// To represent the bottom type, use an empty vec
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Dnf(Vec<DnfPart>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -139,10 +139,10 @@ pub struct Typechecker<'a> {
     /// Indexed by TypeVarId
     type_vars: Vec<TypeVar>,
     /// Subtype relations. Each item is (subtype, supertype)
-    subtypes: HashSet<(TypeId, TypeId)>,
+    subtypes: HashSet<(Dnf, Dnf)>,
     /// Assumed subtype relations (they refer to this as the "later" modality
     /// and use a right arrow to represent it)
-    subtypes_assum: HashSet<(TypeId, TypeId)>,
+    subtypes_assum: HashSet<(Dnf, Dnf)>,
 }
 
 impl<'a> Typechecker<'a> {
@@ -381,44 +381,201 @@ impl<'a> Typechecker<'a> {
 
     /// Constrain `lhs` to be a subtype of `rhs`
     fn constrain(&mut self, lhs: TypeId, rhs: TypeId) {
-        if self.subtypes.contains(&(lhs, rhs)) {
+        let lhs_dnf = self.dnf(lhs);
+        let rhs_dnf = self.dnf(rhs);
+        if self.subtypes.contains(&(lhs_dnf.clone(), rhs_dnf.clone())) {
             // Subtyping relation already exists, no need to do anything (C-Hyp)
             return;
         }
         // Otherwise, follow C-Assum
-        self.subtypes_assum.insert((lhs, rhs));
+        self.subtypes_assum.insert((lhs_dnf, rhs_dnf));
         let neg_rhs = self.push_type(Type::Neg(rhs));
-        let inter = self.push_type(Type::And(lhs, neg_rhs));
-        let dnf = self.dnf(inter);
+        let lhs_and_neg_rhs = self.push_type(Type::And(lhs, neg_rhs));
+        let dnf = self.dnf(lhs_and_neg_rhs);
         self.constrain_bottom(dnf);
     }
 
     /// Constrain the given type to be a subtype of the bottom type
-    fn constrain_bottom(&mut self, ty: Dnf) {}
+    fn constrain_bottom(&mut self, ty: Dnf) {
+        for part in ty.0.iter() {
+            self.constrain_bottom_part(part);
+        }
+    }
+
+    fn constrain_bottom_part(&mut self, part: &DnfPart) {
+        // C-NotBot
+        if part.pos == Conj::default() {
+            panic!("Doesn't typecheck");
+        }
+
+        // TODO constraints involving int, float, number
+
+        for field in part.neg.record.iter() {
+            if part.pos.record.contains(field) {
+                // TODO implement C-Rcd1
+            } else {
+                panic!("C-Rcd2 failed");
+            }
+        }
+
+        let mut part = part.clone();
+
+        // C-Var1
+        while !part.pos.type_vars.is_empty() {
+            let var = part.pos.type_vars.pop().unwrap();
+
+            let c_ty = self.dnf_to_ty(&Dnf(vec![part.clone()]));
+            let not_c = self.push_type(Type::Neg(c_ty));
+
+            self.subtypes.insert((
+                Dnf(vec![DnfPart {
+                    pos: Conj {
+                        type_vars: vec![var],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }]),
+                self.dnf(not_c),
+            ));
+
+            let lb = self.lower_bound(var);
+            self.constrain(lb, not_c);
+        }
+
+        // C-Var2
+        while !part.neg.type_vars.is_empty() {
+            let var = part.neg.type_vars.pop().unwrap();
+
+            let c_ty = self.dnf_to_ty(&Dnf(vec![part.clone()]));
+
+            self.subtypes.insert((
+                self.dnf(c_ty),
+                Dnf(vec![DnfPart {
+                    pos: Conj {
+                        type_vars: vec![var],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }]),
+            ));
+
+            let ub = self.upper_bound(var);
+            self.constrain(c_ty, ub);
+        }
+    }
+
+    fn dnf_to_ty(&mut self, dnf: &Dnf) -> TypeId {
+        let mut res = HashSet::new();
+
+        for part in dnf.0.iter() {
+            if part.pos == Conj::default() {
+                res.insert(self.conj_to_ty(&part.neg));
+            } else {
+                let pos = self.conj_to_ty(&part.pos);
+                if part.neg == Conj::default() {
+                    res.insert(pos);
+                } else {
+                    let neg = self.conj_to_ty(&part.neg);
+                    res.insert(self.push_type(Type::And(pos, neg)));
+                }
+            };
+        }
+
+        if res.is_empty() {
+            BOTTOM_TYPE
+        } else if res.len() == 1 {
+            *res.iter().next().unwrap()
+        } else {
+            let oneof_id = OneOfId(self.oneof_types.len());
+            self.oneof_types.push(res);
+            self.push_type(Type::OneOf(oneof_id))
+        }
+    }
+
+    fn conj_to_ty(&mut self, conj: &Conj) -> TypeId {
+        let mut vars = conj.type_vars.iter();
+        let vars_ty = if let Some(first) = vars.next() {
+            Some(
+                vars.fold(self.push_type(Type::TypeVarRef(*first)), |acc, var| {
+                    let ty = self.push_type(Type::TypeVarRef(*var));
+                    self.push_type(Type::And(acc, ty))
+                }),
+            )
+        } else {
+            None
+        };
+
+        let rest_ty = if let Some(inner) = &conj.list {
+            let inner_ty = self.dnf_to_ty(inner);
+            self.push_type(Type::List(inner_ty))
+        } else if let Some(ty) = &conj.verbatim {
+            *ty
+        } else {
+            TOP_TYPE
+        };
+
+        if let Some(vars_ty) = vars_ty {
+            if rest_ty == TOP_TYPE {
+                vars_ty
+            } else {
+                self.push_type(Type::And(vars_ty, rest_ty))
+            }
+        } else {
+            rest_ty
+        }
+    }
+
+    fn lower_bound(&mut self, var: TypeVarId) -> TypeId {
+        let mut subs = HashSet::new();
+
+        for (sub, supe) in &self.subtypes {}
+
+        if subs.is_empty() {
+            BOTTOM_TYPE
+        } else if subs.len() == 1 {
+            *subs.iter().next().unwrap()
+        } else {
+            let oneof_id = OneOfId(self.oneof_types.len());
+            self.oneof_types.push(subs);
+            self.push_type(Type::OneOf(oneof_id))
+        }
+    }
+
+    fn upper_bound(&mut self, var: TypeVarId) -> TypeId {
+        todo!()
+    }
 
     fn dnf(&self, ty_id: TypeId) -> Dnf {
         match self.types[ty_id.0] {
             Type::Top => Dnf(vec![Default::default()]),
             Type::Bottom => Dnf(vec![]),
-            Type::TypeVarRef(var) => {
-                let mut type_vars = HashSet::new();
-                type_vars.insert(var);
+            Type::TypeVarRef(var) => Dnf(vec![DnfPart {
+                pos: Conj {
+                    type_vars: vec![var],
+                    ..Default::default()
+                },
+                ..Default::default()
+            }]),
+            Type::Record(record_ty_id) => {
+                let fields = self.record_types[record_ty_id.0]
+                    .iter()
+                    .map(|(node, ty)| {
+                        (
+                            String::from_utf8_lossy(self.compiler.get_span_contents(*node))
+                                .to_string(),
+                            self.dnf(*ty),
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 Dnf(vec![DnfPart {
                     pos: Conj {
-                        type_vars,
+                        record: fields,
                         ..Default::default()
                     },
                     ..Default::default()
                 }])
             }
-            Type::Record(record_ty_id) => Dnf(vec![DnfPart {
-                pos: Conj {
-                    record: Some(record_ty_id),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }]),
-            Type::And(lhs, rhs) => self.inter_dnf(self.dnf(lhs), self.dnf(rhs)),
+            Type::And(lhs, rhs) => self.inter_dnf(&self.dnf(lhs), &self.dnf(rhs)),
             Type::OneOf(oneof_id) => {
                 let mut types = self.oneof_types[oneof_id.0].iter();
                 let mut res = self.dnf(*types.next().expect("oneof must have at least one type"));
@@ -437,6 +594,7 @@ impl<'a> Typechecker<'a> {
             | Type::Binary
             | Type::None
             | Type::Nothing
+            | Type::Closure
             | Type::Error => Dnf(vec![DnfPart {
                 pos: Conj {
                     verbatim: Some(ty_id),
@@ -446,48 +604,97 @@ impl<'a> Typechecker<'a> {
             }]),
             Type::List(elem_ty) => Dnf(vec![DnfPart {
                 pos: Conj {
-                    list: Some(elem_ty),
+                    list: Some(self.dnf(elem_ty)),
                     ..Default::default()
                 },
                 ..Default::default()
             }]),
             Type::Stream(elem_ty) => todo!(),
-            Type::Any => Dnf(vec![DnfPart {
-                any: false,
+            Type::Any | Type::Unknown => Dnf(vec![DnfPart {
+                any: true,
                 ..Default::default()
             }]),
-            Type::Closure => todo!(),
-            Type::Neg(ty_id) => match self.types[ty_id.0] {
-                Type::And(lhs, rhs) => {
-                    let lhs = self.neg(self.dnf(lhs));
-                    let rhs = self.neg(self.dnf(rhs));
-                    let mut parts = lhs.0;
-                    parts.extend(rhs.0);
-                    self.union(&parts)
-                }
-                Type::OneOf(oneof_id) => {
-                    let types = self.oneof_types[oneof_id.0].clone();
-                    let mut types = types.iter();
-                    let first = *types.next().expect("oneof must have at least one type");
-                    let mut res = self.neg(self.dnf(first));
-                    for ty in types {
-                        res = self.inter_dnf(res, self.neg(self.dnf(*ty)));
-                    }
-                    res
-                }
-                _ => self.neg(self.dnf(ty_id)),
-            },
-            Type::Unknown | Type::Forbidden => unreachable!(),
+            Type::Neg(ty_id) => self.dnf_neg(ty_id),
+            Type::Forbidden => unreachable!(),
         }
     }
 
-    fn neg(&self, mut dnf: Dnf) -> Dnf {
-        for part in dnf.0.iter_mut() {
-            let pos = part.pos.clone();
-            part.pos = part.neg.clone();
-            part.neg = pos;
+    /// Get the DNF of the *negation* of `ty_id`
+    fn dnf_neg(&self, ty_id: TypeId) -> Dnf {
+        match self.types[ty_id.0] {
+            Type::Top => self.dnf(BOTTOM_TYPE),
+            Type::Bottom => self.dnf(TOP_TYPE),
+            Type::Neg(ty_id) => self.dnf(ty_id),
+            Type::And(lhs, rhs) => {
+                let lhs = self.dnf_neg(lhs);
+                let rhs = self.dnf_neg(rhs);
+                let mut parts = lhs.0;
+                parts.extend(rhs.0);
+                self.union(&parts)
+            }
+            Type::OneOf(oneof_id) => {
+                let types = self.oneof_types[oneof_id.0].clone();
+                let mut types = types.iter();
+                let first = *types.next().expect("oneof must have at least one type");
+                let mut res = self.dnf_neg(first);
+                for ty in types {
+                    res = self.inter_dnf(&res, &self.dnf_neg(*ty));
+                }
+                res
+            }
+            Type::TypeVarRef(var) => Dnf(vec![DnfPart {
+                neg: Conj {
+                    type_vars: vec![var],
+                    ..Default::default()
+                },
+                ..Default::default()
+            }]),
+            Type::Record(record_ty_id) => {
+                let fields = self.record_types[record_ty_id.0]
+                    .iter()
+                    .map(|(node, ty)| {
+                        (
+                            String::from_utf8_lossy(self.compiler.get_span_contents(*node))
+                                .to_string(),
+                            self.dnf(*ty),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                Dnf(vec![DnfPart {
+                    neg: Conj {
+                        record: fields,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }])
+            }
+            Type::Int
+            | Type::Float
+            | Type::Number
+            | Type::Bool
+            | Type::String
+            | Type::Binary
+            | Type::None
+            | Type::Nothing
+            | Type::Closure
+            | Type::Error => Dnf(vec![DnfPart {
+                neg: Conj {
+                    verbatim: Some(ty_id),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }]),
+            Type::List(elem_ty) => Dnf(vec![DnfPart {
+                neg: Conj {
+                    list: Some(self.dnf(elem_ty)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }]),
+            Type::Unknown | Type::Any => Dnf(vec![Default::default()]),
+            Type::Forbidden => todo!(),
+            Type::Stream(type_id) => todo!(),
         }
-        dnf
     }
 
     fn union(&self, parts: &[DnfPart]) -> Dnf {
@@ -500,7 +707,7 @@ impl<'a> Typechecker<'a> {
         Dnf(res)
     }
 
-    fn inter_dnf(&self, lhs: Dnf, rhs: Dnf) -> Dnf {
+    fn inter_dnf(&self, lhs: &Dnf, rhs: &Dnf) -> Dnf {
         let mut res = vec![];
         for l in lhs.0.iter() {
             for r in rhs.0.iter() {
@@ -522,13 +729,17 @@ impl<'a> Typechecker<'a> {
             if lhs.neg.type_vars.contains(var) {
                 return None;
             }
-            lhs.pos.type_vars.insert(*var);
+            if !lhs.pos.type_vars.contains(var) {
+                lhs.pos.type_vars.push(*var);
+            }
         }
         for var in rhs.neg.type_vars.iter() {
             if lhs.pos.type_vars.contains(var) {
                 return None;
             }
-            lhs.neg.type_vars.insert(*var);
+            if !lhs.neg.type_vars.contains(var) {
+                lhs.neg.type_vars.push(*var);
+            }
         }
 
         if let Some(rhs_ty) = rhs.pos.verbatim {
@@ -576,7 +787,44 @@ impl<'a> Typechecker<'a> {
             }
         }
 
-        // todo merge records and lists
+        if let Some(rhs_lst) = &rhs.pos.list {
+            if let Some(lhs_lst) = &lhs.pos.list {
+                let inter = self.inter_dnf(&lhs_lst, &rhs_lst);
+                if inter.0.is_empty() {
+                    // The intersection is uninhabited (bottom type)
+                    return None;
+                }
+                lhs.pos.list = Some(inter);
+            } else {
+                lhs.pos.list = Some(rhs_lst.clone());
+            }
+            if let Some(lhs_lst) = &lhs.neg.list {
+                if !self.inter_dnf(&lhs_lst, &rhs_lst).0.is_empty() {
+                    // Intersection should be empty (bottom type)
+                    return None;
+                }
+            }
+        }
+        if let Some(rhs_lst) = &rhs.neg.list {
+            if let Some(lhs_lst) = lhs.neg.list {
+                let inter = self.inter_dnf(&lhs_lst, &rhs_lst);
+                if inter.0.is_empty() {
+                    // The intersection is uninhabited (bottom type)
+                    return None;
+                }
+                lhs.neg.list = Some(inter);
+            } else {
+                lhs.neg.list = Some(rhs_lst.clone());
+            }
+            if let Some(lhs_lst) = lhs.pos.list {
+                if !self.inter_dnf(&lhs_lst, &rhs_lst).0.is_empty() {
+                    // Intersection should be empty (bottom type)
+                    return None;
+                }
+            }
+        }
+
+        // todo merge records
 
         None
     }
@@ -1288,12 +1536,16 @@ impl<'a> Typechecker<'a> {
                 fmt.push('>');
                 fmt
             }
-            Type::TypeVarRef(_) => todo!(),
+            Type::TypeVarRef(_) => "var".to_string(),
             Type::Error => "error".to_string(),
             Type::Top => "top".to_string(),
             Type::Bottom => "bottom".to_string(),
             Type::Neg(ty_id) => format!("~{}", self.type_to_string(*ty_id)),
-            Type::And(type_id, type_id1) => todo!(),
+            Type::And(lhs, rhs) => format!(
+                "{} & {}",
+                self.type_to_string(*lhs),
+                self.type_to_string(*rhs)
+            ),
         }
     }
 
