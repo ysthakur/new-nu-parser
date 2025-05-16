@@ -231,7 +231,14 @@ impl<'a> Typechecker<'a> {
         if !self.compiler.ast_nodes.is_empty() {
             let last = self.compiler.ast_nodes.len() - 1;
             let last_node_id = NodeId(last);
-            self.typecheck_node(last_node_id)
+            self.typecheck_node(last_node_id);
+
+            println!("=== Subtype bounds ===");
+            for (sub, supe) in self.subtypes.clone() {
+                let sub = self.dnf_to_ty(&sub);
+                let supe = self.dnf_to_ty(&supe);
+                println!("{} {}", self.type_to_string(sub), self.type_to_string(supe));
+            }
         }
     }
 
@@ -528,7 +535,18 @@ impl<'a> Typechecker<'a> {
     fn lower_bound(&mut self, var: TypeVarId) -> TypeId {
         let mut subs = HashSet::new();
 
-        for (sub, supe) in &self.subtypes {}
+        for (sub, supe) in self.subtypes.clone() {
+            let Dnf(parts) = supe;
+            if parts.len() == 1 {
+                let DnfPart {
+                    pos: Conj { type_vars, .. },
+                    ..
+                } = &parts[0];
+                if type_vars.contains(&var) {
+                    subs.insert(self.dnf_to_ty(&sub));
+                }
+            }
+        }
 
         if subs.is_empty() {
             BOTTOM_TYPE
@@ -542,7 +560,27 @@ impl<'a> Typechecker<'a> {
     }
 
     fn upper_bound(&mut self, var: TypeVarId) -> TypeId {
-        todo!()
+        let mut res = TOP_TYPE;
+
+        for (sub, supe) in self.subtypes.clone() {
+            let Dnf(parts) = sub;
+            if parts.len() == 1 {
+                let DnfPart {
+                    pos: Conj { type_vars, .. },
+                    ..
+                } = &parts[0];
+                if type_vars.contains(&var) {
+                    let supe = self.dnf_to_ty(&supe);
+                    if res == TOP_TYPE {
+                        res = supe;
+                    } else {
+                        res = self.push_type(Type::And(res, supe));
+                    }
+                }
+            }
+        }
+
+        res
     }
 
     fn dnf(&self, ty_id: TypeId) -> Dnf {
@@ -1052,6 +1090,8 @@ impl<'a> Typechecker<'a> {
         self.typecheck_node(rhs);
         self.set_node_type_id(op, FORBIDDEN_TYPE);
 
+        let lhs_id = self.type_id_of(lhs);
+        let rhs_id = self.type_id_of(rhs);
         let lhs_type = self.type_of(lhs);
         let rhs_type = self.type_of(rhs);
 
@@ -1061,6 +1101,8 @@ impl<'a> Typechecker<'a> {
             | AstNode::GreaterThan
             | AstNode::LessThanOrEqual
             | AstNode::GreaterThanOrEqual => {
+                self.constrain(lhs_id, NUMBER_TYPE);
+                self.constrain(rhs_id, NUMBER_TYPE);
                 if check_numeric_op(lhs_type, rhs_type) == Type::Unknown {
                     self.binary_op_err("comparison", lhs, op, rhs);
                     None
@@ -1074,6 +1116,8 @@ impl<'a> Typechecker<'a> {
             | AstNode::FloorDiv
             | AstNode::Modulo
             | AstNode::Pow => {
+                self.constrain(lhs_id, NUMBER_TYPE);
+                self.constrain(rhs_id, NUMBER_TYPE);
                 let type_id = check_numeric_op(lhs_type, rhs_type);
 
                 if type_id == Type::Unknown {
@@ -1083,13 +1127,17 @@ impl<'a> Typechecker<'a> {
                     Some(type_id)
                 }
             }
-            AstNode::RegexMatch | AstNode::NotRegexMatch => match (lhs_type, rhs_type) {
-                (Type::String | Type::Any, Type::String | Type::Any) => Some(Type::Bool),
-                _ => {
-                    self.binary_op_err("string operation", lhs, op, rhs);
-                    None
+            AstNode::RegexMatch | AstNode::NotRegexMatch => {
+                self.constrain(lhs_id, STRING_TYPE);
+                self.constrain(rhs_id, STRING_TYPE);
+                match (lhs_type, rhs_type) {
+                    (Type::String | Type::Any, Type::String | Type::Any) => Some(Type::Bool),
+                    _ => {
+                        self.binary_op_err("string operation", lhs, op, rhs);
+                        None
+                    }
                 }
-            },
+            }
             AstNode::In => match rhs_type {
                 Type::String => match lhs_type {
                     Type::String | Type::Any => Some(Type::Bool),
@@ -1112,13 +1160,17 @@ impl<'a> Typechecker<'a> {
                     None
                 }
             },
-            AstNode::And | AstNode::Xor | AstNode::Or => match (lhs_type, rhs_type) {
-                (Type::Bool, Type::Bool) => Some(Type::Bool),
-                _ => {
-                    self.binary_op_err("logical operation", lhs, op, rhs);
-                    None
+            AstNode::And | AstNode::Xor | AstNode::Or => {
+                self.constrain(lhs_id, BOOL_TYPE);
+                self.constrain(rhs_id, BOOL_TYPE);
+                match (lhs_type, rhs_type) {
+                    (Type::Bool, Type::Bool) => Some(Type::Bool),
+                    _ => {
+                        self.binary_op_err("logical operation", lhs, op, rhs);
+                        None
+                    }
                 }
-            },
+            }
             AstNode::Plus => {
                 let ty = check_plus_op(lhs_type, rhs_type);
 
